@@ -18,7 +18,7 @@ import {
   Eye,
   Grid3X3,
 } from 'lucide-react';
-import { deletePdfPages, reorderPdfPages, extractPdfPages, downloadPdf } from '../utils/pdfEditor';
+import { reorderPdfPages, extractPdfPages, downloadPdf } from '../utils/pdfEditor';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
