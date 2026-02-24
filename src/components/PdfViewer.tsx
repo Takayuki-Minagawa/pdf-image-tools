@@ -66,6 +66,7 @@ export function PdfViewer({ file, onConvert, isConverting }: PdfViewerProps) {
   const [extractStart, setExtractStart] = useState<string>('');
   const [extractEnd, setExtractEnd] = useState<string>('');
   const [hasChanges, setHasChanges] = useState(false);
+  const [pageInputValue, setPageInputValue] = useState<string>('1');
 
   // PDFを読み込む
   useEffect(() => {
@@ -207,6 +208,28 @@ export function PdfViewer({ file, onConvert, isConverting }: PdfViewerProps) {
 
   const prevPage = () => setCurrentPage((p) => Math.max(1, p - 1));
   const nextPage = () => setCurrentPage((p) => Math.min(pageOrder.length, p + 1));
+
+  // currentPage が外部から変わったときに入力欄を同期
+  useEffect(() => {
+    setPageInputValue(String(currentPage));
+  }, [currentPage]);
+
+  const handlePageInputCommit = () => {
+    const num = parseInt(pageInputValue, 10);
+    if (!isNaN(num) && num >= 1 && num <= pageOrder.length) {
+      setCurrentPage(num);
+    } else {
+      // 無効な値はリセット
+      setPageInputValue(String(currentPage));
+    }
+  };
+
+  const handlePageInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.currentTarget.blur();
+      handlePageInputCommit();
+    }
+  };
 
   const zoomIn = () => {
     setFitMode('custom');
@@ -378,9 +401,18 @@ export function PdfViewer({ file, onConvert, isConverting }: PdfViewerProps) {
               >
                 <ChevronLeft className="w-5 h-5" />
               </button>
-              <span className="text-sm font-medium min-w-[100px] text-center">
-                {currentPage} / {pageOrder.length} ページ
-              </span>
+              <div className="flex items-center gap-1 text-sm font-medium">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={pageInputValue}
+                  onChange={(e) => setPageInputValue(e.target.value)}
+                  onBlur={handlePageInputCommit}
+                  onKeyDown={handlePageInputKeyDown}
+                  className="w-12 text-center border border-gray-300 rounded-md px-1 py-0.5 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"
+                />
+                <span className="text-gray-500">/ {pageOrder.length} ページ</span>
+              </div>
               <button
                 onClick={nextPage}
                 disabled={currentPage >= pageOrder.length}
