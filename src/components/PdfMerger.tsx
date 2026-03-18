@@ -11,6 +11,7 @@ import {
   Download,
   FileText,
   GripVertical,
+  ArrowDownUp,
 } from 'lucide-react';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
@@ -30,6 +31,8 @@ export function PdfMerger() {
   const [isMerging, setIsMerging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editingValue, setEditingValue] = useState('');
 
   const loadPdfFile = async (file: File): Promise<PdfFile> => {
     const arrayBuffer = await file.arrayBuffer();
@@ -136,6 +139,32 @@ export function PdfMerger() {
     const newFiles = [...pdfFiles];
     [newFiles[index], newFiles[index + 1]] = [newFiles[index + 1], newFiles[index]];
     setPdfFiles(newFiles);
+  };
+
+  const reverseOrder = () => {
+    setPdfFiles((prev) => [...prev].reverse());
+  };
+
+  const moveTo = (fromIndex: number, toPosition: number) => {
+    const targetIndex = toPosition - 1;
+    if (targetIndex < 0 || targetIndex >= pdfFiles.length || targetIndex === fromIndex) return;
+    const newFiles = [...pdfFiles];
+    const [item] = newFiles.splice(fromIndex, 1);
+    newFiles.splice(targetIndex, 0, item);
+    setPdfFiles(newFiles);
+  };
+
+  const startEditing = (index: number) => {
+    setEditingIndex(index);
+    setEditingValue(String(index + 1));
+  };
+
+  const commitEditing = (fromIndex: number) => {
+    const target = parseInt(editingValue, 10);
+    if (!isNaN(target)) {
+      moveTo(fromIndex, target);
+    }
+    setEditingIndex(null);
   };
 
   const handleListDragStart = (index: number) => {
@@ -252,6 +281,14 @@ export function PdfMerger() {
             </div>
             <div className="flex gap-2">
               <button
+                onClick={reverseOrder}
+                className="flex items-center gap-2 px-3 py-2 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors text-sm"
+                title="順序を逆にする"
+              >
+                <ArrowDownUp className="w-4 h-4" />
+                逆順
+              </button>
+              <button
                 onClick={clearAll}
                 className="flex items-center gap-2 px-3 py-2 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors text-sm"
               >
@@ -271,7 +308,7 @@ export function PdfMerger() {
 
           {/* 操作説明 */}
           <div className="text-sm text-gray-500 bg-gray-50 p-3 rounded-lg">
-            💡 ドラッグ＆ドロップまたは矢印ボタンで順番を変更できます
+            💡 ドラッグ＆ドロップ、矢印ボタン、または番号クリックで順番を変更できます
           </div>
 
           {/* ファイルリスト */}
@@ -292,10 +329,31 @@ export function PdfMerger() {
                   <GripVertical className="w-5 h-5" />
                 </div>
 
-                {/* 順番 */}
-                <div className="w-8 h-8 flex items-center justify-center bg-purple-100 text-purple-700 font-bold rounded-lg text-sm">
-                  {index + 1}
-                </div>
+                {/* 順番（クリックで直接指定） */}
+                {editingIndex === index ? (
+                  <input
+                    type="number"
+                    min={1}
+                    max={pdfFiles.length}
+                    value={editingValue}
+                    onChange={(e) => setEditingValue(e.target.value)}
+                    onBlur={() => commitEditing(index)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') commitEditing(index);
+                      if (e.key === 'Escape') setEditingIndex(null);
+                    }}
+                    autoFocus
+                    className="w-10 h-8 text-center bg-purple-50 border-2 border-purple-400 text-purple-700 font-bold rounded-lg text-sm outline-none"
+                  />
+                ) : (
+                  <button
+                    onClick={() => startEditing(index)}
+                    className="w-8 h-8 flex items-center justify-center bg-purple-100 text-purple-700 font-bold rounded-lg text-sm hover:bg-purple-200 transition-colors cursor-pointer"
+                    title="クリックして移動先を指定"
+                  >
+                    {index + 1}
+                  </button>
+                )}
 
                 {/* サムネイル */}
                 <div className="w-12 h-16 bg-gray-100 rounded overflow-hidden flex-shrink-0">
