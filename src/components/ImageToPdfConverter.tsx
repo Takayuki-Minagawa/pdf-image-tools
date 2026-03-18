@@ -3,7 +3,7 @@ import { Dropzone } from './Dropzone';
 import { ProgressBar } from './ProgressBar';
 import { imagesToPdf, loadImage } from '../utils/imagesToPdf';
 import type { ImageFile } from '../utils/imagesToPdf';
-import { Image, Download, Trash2, GripVertical, ChevronUp, ChevronDown, FileImage } from 'lucide-react';
+import { Image, Download, Trash2, GripVertical, ChevronUp, ChevronDown, FileImage, ArrowDownUp } from 'lucide-react';
 
 export function ImageToPdfConverter() {
   const [images, setImages] = useState<ImageFile[]>([]);
@@ -11,6 +11,8 @@ export function ImageToPdfConverter() {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editingValue, setEditingValue] = useState('');
 
   const handleDrop = useCallback(async (files: File[]) => {
     setError(null);
@@ -80,6 +82,32 @@ export function ImageToPdfConverter() {
     setImages(newImages);
   };
 
+  const reverseOrder = () => {
+    setImages((prev) => [...prev].reverse());
+  };
+
+  const moveTo = (fromIndex: number, toPosition: number) => {
+    const targetIndex = toPosition - 1;
+    if (targetIndex < 0 || targetIndex >= images.length || targetIndex === fromIndex) return;
+    const newImages = [...images];
+    const [item] = newImages.splice(fromIndex, 1);
+    newImages.splice(targetIndex, 0, item);
+    setImages(newImages);
+  };
+
+  const startEditing = (index: number) => {
+    setEditingIndex(index);
+    setEditingValue(String(index + 1));
+  };
+
+  const commitEditing = (fromIndex: number) => {
+    const target = parseInt(editingValue, 10);
+    if (!isNaN(target)) {
+      moveTo(fromIndex, target);
+    }
+    setEditingIndex(null);
+  };
+
   const handleDragStart = (index: number) => {
     setDraggedIndex(index);
   };
@@ -134,6 +162,14 @@ export function ImageToPdfConverter() {
             </div>
             <div className="flex gap-2">
               <button
+                onClick={reverseOrder}
+                className="flex items-center gap-2 px-3 py-2 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors text-sm"
+                title="順序を逆にする"
+              >
+                <ArrowDownUp className="w-4 h-4" />
+                逆順
+              </button>
+              <button
                 onClick={handleClear}
                 className="flex items-center gap-2 px-3 py-2 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors text-sm"
               >
@@ -157,7 +193,7 @@ export function ImageToPdfConverter() {
 
           {/* 操作説明 */}
           <div className="text-sm text-gray-500 bg-gray-50 p-3 rounded-lg">
-            💡 ドラッグ＆ドロップまたは矢印ボタンで順番を変更できます
+            💡 ドラッグ＆ドロップ、矢印ボタン、または番号クリックで順番を変更できます
           </div>
 
           {/* 画像リスト */}
@@ -178,10 +214,31 @@ export function ImageToPdfConverter() {
                   <GripVertical className="w-5 h-5" />
                 </div>
 
-                {/* 順番 */}
-                <div className="w-8 h-8 flex items-center justify-center bg-green-100 text-green-700 font-bold rounded-lg text-sm">
-                  {index + 1}
-                </div>
+                {/* 順番（クリックで直接指定） */}
+                {editingIndex === index ? (
+                  <input
+                    type="number"
+                    min={1}
+                    max={images.length}
+                    value={editingValue}
+                    onChange={(e) => setEditingValue(e.target.value)}
+                    onBlur={() => commitEditing(index)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') commitEditing(index);
+                      if (e.key === 'Escape') setEditingIndex(null);
+                    }}
+                    autoFocus
+                    className="w-10 h-8 text-center bg-green-50 border-2 border-green-400 text-green-700 font-bold rounded-lg text-sm outline-none"
+                  />
+                ) : (
+                  <button
+                    onClick={() => startEditing(index)}
+                    className="w-8 h-8 flex items-center justify-center bg-green-100 text-green-700 font-bold rounded-lg text-sm hover:bg-green-200 transition-colors cursor-pointer"
+                    title="クリックして移動先を指定"
+                  >
+                    {index + 1}
+                  </button>
+                )}
 
                 {/* サムネイル */}
                 <div className="w-16 h-16 bg-gray-100 rounded overflow-hidden flex-shrink-0">
