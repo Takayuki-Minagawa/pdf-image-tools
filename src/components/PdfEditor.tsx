@@ -27,7 +27,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 type SubTab = 'textbox' | 'header-footer' | 'page-number';
 
-export function PdfEditor() {
+export default function PdfEditor() {
   // File state
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [pdfBytes, setPdfBytes] = useState<ArrayBuffer | null>(null);

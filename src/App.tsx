@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useState, lazy, Suspense } from 'react';
 import { PdfToImageConverter } from './components/PdfToImageConverter';
 import { ImageToPdfConverter } from './components/ImageToPdfConverter';
 import { PdfMerger } from './components/PdfMerger';
-import { PdfEditor } from './components/PdfEditor';
 import { FileText, Image, Github, Combine, Pencil } from 'lucide-react';
+
+const PdfEditor = lazy(() => import('./components/PdfEditor'));
 
 type Tab = 'pdf-to-image' | 'image-to-pdf' | 'pdf-merge' | 'pdf-edit';
 
@@ -93,7 +94,9 @@ function App() {
             ) : activeTab === 'pdf-merge' ? (
               <PdfMerger />
             ) : (
-              <PdfEditor />
+              <Suspense fallback={<div className="flex items-center justify-center h-64 text-gray-500">読み込み中...</div>}>
+                <PdfEditor />
+              </Suspense>
             )}
           </div>
         </div>
