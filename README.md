@@ -35,14 +35,35 @@
 - 各PDFのページ数とサムネイルを表示
 - 合計ページ数の表示
 
+### PDF編集
+- **テキストボックス挿入**
+  - 枠線スタイル（実線 / 破線 / 点線 / なし）、太さ、色を設定可能
+  - 背景色（透明対応）、文字色、フォントサイズ
+  - 特定ページまたは全ページに適用
+  - プレビュー上クリックで位置を直接指定
+  - 日本語テキスト対応（Noto Sans JP フォント埋め込み）
+- **ヘッダー / フッター**
+  - 左・中央・右の3箇所に配置
+  - プレースホルダー対応：ページ番号、総ページ数、日付、ファイル名
+  - フォントサイズ、文字色、余白の調整
+- **ページ番号**
+  - 開始ページの指定（例：3ページ目から番号を振り、1〜2ページは番号なし）
+  - 開始番号の指定（例：3ページ目を「1」として開始）
+  - 表示形式：数字 / ローマ数字（大文字・小文字） / ダッシュ付き（- 1 -）
+  - 6箇所の配置位置（左上・中央上・右上・左下・中央下・右下）
+  - 接頭辞・接尾辞のカスタマイズ
+- リアルタイムプレビュー
+- フォントサブセット埋め込みによる出力サイズ最適化
+
 ## 🛠️ 技術スタック
 
 - **フレームワーク**: React 19 + TypeScript
 - **ビルドツール**: Vite 7
 - **スタイリング**: Tailwind CSS 4
-- **PDF処理**: 
+- **PDF処理**:
   - pdfjs-dist（PDF表示・画像変換）
   - pdf-lib（PDF編集・結合）
+  - @pdf-lib/fontkit（カスタムフォント埋め込み）
   - jsPDF（画像からPDF作成）
 - **アイコン**: Lucide React
 
@@ -67,19 +88,28 @@ npm run preview
 ```
 src/
 ├── components/
-│   ├── Dropzone.tsx          # ファイルドロップゾーン
-│   ├── ImagePreview.tsx      # 変換後の画像プレビュー
+│   ├── Dropzone.tsx            # ファイルドロップゾーン
+│   ├── ImagePreview.tsx        # 変換後の画像プレビュー
 │   ├── ImageToPdfConverter.tsx # 画像→PDF変換
-│   ├── PdfMerger.tsx         # PDF結合
+│   ├── PdfEditor.tsx           # PDF編集（テキストボックス・ヘッダー/フッター・ページ番号）
+│   ├── PdfMerger.tsx           # PDF結合
 │   ├── PdfToImageConverter.tsx # PDF→画像変換
-│   ├── PdfViewer.tsx         # PDFビューワー・編集
-│   └── ProgressBar.tsx       # 進捗バー
+│   ├── PdfViewer.tsx           # PDFビューワー・ページ編集
+│   ├── ProgressBar.tsx         # 進捗バー
+│   └── pdfEdit/
+│       ├── TextBoxEditor.tsx       # テキストボックス設定パネル
+│       ├── HeaderFooterEditor.tsx  # ヘッダー/フッター設定パネル
+│       └── PageNumberEditor.tsx    # ページ番号設定パネル
 ├── hooks/
-│   └── useDropzone.ts        # ドラッグ＆ドロップフック
+│   └── useDropzone.ts          # ドラッグ＆ドロップフック
+├── types/
+│   └── pdfEdit.ts              # PDF編集の型定義
 ├── utils/
-│   ├── imagesToPdf.ts        # 画像→PDF変換ユーティリティ
-│   ├── pdfEditor.ts          # PDF編集ユーティリティ
-│   └── pdfToImages.ts        # PDF→画像変換ユーティリティ
+│   ├── fontLoader.ts           # 日本語フォント遅延読み込み
+│   ├── imagesToPdf.ts          # 画像→PDF変換ユーティリティ
+│   ├── pdfEditOperations.ts    # PDF編集操作（テキスト描画・ヘッダー/フッター・ページ番号）
+│   ├── pdfEditor.ts            # PDFページ編集ユーティリティ
+│   └── pdfToImages.ts          # PDF→画像変換ユーティリティ
 ├── App.tsx
 ├── main.tsx
 └── index.css
