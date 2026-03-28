@@ -17,7 +17,7 @@ import { Dropzone } from './Dropzone';
 import { TextBoxEditor } from './pdfEdit/TextBoxEditor';
 import { HeaderFooterEditor } from './pdfEdit/HeaderFooterEditor';
 import { PageNumberEditor } from './pdfEdit/PageNumberEditor';
-import { applyPdfEdits } from '../utils/pdfEditOperations';
+import { applyPdfEdits, wrapTextByWidth } from '../utils/pdfEditOperations';
 import { resolvePlaceholders, formatPageNumber } from '../utils/pdfEditOperations';
 import { downloadPdf } from '../utils/pdfEditor';
 import type { TextBoxConfig, HeaderFooterSettings, PageNumberingConfig } from '../types/pdfEdit';
@@ -156,12 +156,17 @@ export function PdfEditor() {
         ctx.font = `${box.fontSize * scale}px sans-serif`;
         ctx.textBaseline = 'top';
         const padding = 4 * scale;
-        const lines = box.text.split('\n');
+        const maxTextWidth = w - padding * 2;
+        const lines = wrapTextByWidth(
+          box.text,
+          (t) => ctx.measureText(t).width,
+          maxTextWidth,
+        );
         const lineHeight = box.fontSize * 1.3 * scale;
         for (let i = 0; i < lines.length; i++) {
           const textY = y + padding + i * lineHeight;
           if (textY + lineHeight > y + h) break;
-          ctx.fillText(lines[i], x + padding, textY, w - padding * 2);
+          ctx.fillText(lines[i], x + padding, textY);
         }
       }
     }

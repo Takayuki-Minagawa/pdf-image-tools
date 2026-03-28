@@ -19,33 +19,78 @@ function toRgb(hex: string) {
   );
 }
 
-function wrapText(text: string, font: PDFFont, fontSize: number, maxWidth: number): string[] {
-  const lines: string[] = [];
-  const paragraphs = text.split('\n');
+function isCjkChar(char: string): boolean {
+  const code = char.codePointAt(0) ?? 0;
+  return (
+    (code >= 0x2E80 && code <= 0x9FFF) ||
+    (code >= 0xF900 && code <= 0xFAFF) ||
+    (code >= 0xFE30 && code <= 0xFE4F) ||
+    (code >= 0xFF00 && code <= 0xFFEF) ||
+    (code >= 0x20000 && code <= 0x2FA1F)
+  );
+}
 
-  for (const paragraph of paragraphs) {
+/**
+ * CJK対応テキスト折り返し。measureWidth に幅計測関数を渡すことで
+ * pdf-lib (font.widthOfTextAtSize) / Canvas (ctx.measureText) 両方で使える。
+ */
+export function wrapTextByWidth(
+  text: string,
+  measureWidth: (text: string) => number,
+  maxWidth: number,
+): string[] {
+  const lines: string[] = [];
+
+  for (const paragraph of text.split('\n')) {
     if (paragraph === '') {
       lines.push('');
       continue;
     }
-    const words = paragraph.split(/\s+/);
+
     let currentLine = '';
 
-    for (const word of words) {
-      const testLine = currentLine ? `${currentLine} ${word}` : word;
-      const width = font.widthOfTextAtSize(testLine, fontSize);
+    for (const char of paragraph) {
+      const testLine = currentLine + char;
 
-      if (width > maxWidth && currentLine) {
-        lines.push(currentLine);
-        currentLine = word;
-      } else {
+      if (measureWidth(testLine) <= maxWidth) {
         currentLine = testLine;
+        continue;
+      }
+
+      // Exceeded maxWidth — need to break
+      if (currentLine === '') {
+        // Single char exceeds width; push it anyway to avoid infinite loop
+        lines.push(char);
+        continue;
+      }
+
+      if (isCjkChar(char) || char === ' ') {
+        // CJK or space: break right before this char
+        lines.push(currentLine);
+        currentLine = char === ' ' ? '' : char;
+        continue;
+      }
+
+      // Non-CJK: try to break at last space
+      const lastSpace = currentLine.lastIndexOf(' ');
+      if (lastSpace > 0) {
+        lines.push(currentLine.slice(0, lastSpace));
+        currentLine = currentLine.slice(lastSpace + 1) + char;
+      } else {
+        // No space — force break
+        lines.push(currentLine);
+        currentLine = char;
       }
     }
+
     if (currentLine) lines.push(currentLine);
   }
 
   return lines.length === 0 ? [''] : lines;
+}
+
+function wrapText(text: string, font: PDFFont, fontSize: number, maxWidth: number): string[] {
+  return wrapTextByWidth(text, (t) => font.widthOfTextAtSize(t, fontSize), maxWidth);
 }
 
 function toRoman(num: number, upper: boolean): string {
