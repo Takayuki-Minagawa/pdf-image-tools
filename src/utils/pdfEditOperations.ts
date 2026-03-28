@@ -1,4 +1,5 @@
-import { PDFDocument, StandardFonts, rgb, PDFFont } from 'pdf-lib';
+import { PDFDocument, rgb, PDFFont } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
 import type {
   TextBoxConfig,
   HeaderFooterSettings,
@@ -6,6 +7,7 @@ import type {
   NumberingFormat,
   PdfEditState,
 } from '../types/pdfEdit';
+import { loadFontBytes } from './fontLoader';
 
 function toRgb(hex: string) {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -189,7 +191,9 @@ function applyHeaderFooter(
     if (settings.header.enabled) {
       const { fontSize, fontColor, margin, marginHorizontal, left, center, right } =
         settings.header;
-      const y = pageHeight - margin;
+      // drawText positions by baseline; subtract ascent so the top of text aligns with margin
+      const ascent = font.heightAtSize(fontSize, { descender: false });
+      const y = pageHeight - margin - ascent;
 
       const draw = (text: string, align: 'left' | 'center' | 'right') => {
         if (!text) return;
@@ -254,7 +258,8 @@ function applyPageNumbers(pdfDoc: PDFDocument, config: PageNumberingConfig, font
 
     let y: number;
     if (config.position.startsWith('top')) {
-      y = pageHeight - config.margin;
+      const ascent = font.heightAtSize(config.fontSize, { descender: false });
+      y = pageHeight - config.margin - ascent;
     } else {
       y = config.margin;
     }
@@ -275,7 +280,9 @@ export async function applyPdfEdits(
   fileName: string,
 ): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.load(pdfBytes);
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  pdfDoc.registerFontkit(fontkit);
+  const fontBytes = await loadFontBytes();
+  const font = await pdfDoc.embedFont(fontBytes);
 
   if (editState.textBoxes.length > 0) {
     applyTextBoxes(pdfDoc, editState.textBoxes, font);
