@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useState, lazy, Suspense } from 'react';
 import { PdfToImageConverter } from './components/PdfToImageConverter';
 import { ImageToPdfConverter } from './components/ImageToPdfConverter';
 import { PdfMerger } from './components/PdfMerger';
-import { FileText, Image, Github, Combine } from 'lucide-react';
+import { FileText, Image, Github, Combine, Pencil } from 'lucide-react';
 
-type Tab = 'pdf-to-image' | 'image-to-pdf' | 'pdf-merge';
+const PdfEditor = lazy(() => import('./components/PdfEditor'));
+
+type Tab = 'pdf-to-image' | 'image-to-pdf' | 'pdf-merge' | 'pdf-edit';
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('pdf-to-image');
@@ -71,6 +73,17 @@ function App() {
               <Combine className="w-5 h-5" />
               PDF結合
             </button>
+            <button
+              onClick={() => setActiveTab('pdf-edit')}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-4 text-sm font-medium transition-colors ${
+                activeTab === 'pdf-edit'
+                  ? 'bg-amber-50 text-amber-600 border-b-2 border-amber-600'
+                  : 'text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              <Pencil className="w-5 h-5" />
+              PDF編集
+            </button>
           </div>
 
           <div className="p-6">
@@ -78,8 +91,12 @@ function App() {
               <PdfToImageConverter />
             ) : activeTab === 'image-to-pdf' ? (
               <ImageToPdfConverter />
-            ) : (
+            ) : activeTab === 'pdf-merge' ? (
               <PdfMerger />
+            ) : (
+              <Suspense fallback={<div className="flex items-center justify-center h-64 text-gray-500">読み込み中...</div>}>
+                <PdfEditor />
+              </Suspense>
             )}
           </div>
         </div>
