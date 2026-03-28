@@ -25,7 +25,7 @@ interface PdfFile {
   bytes: ArrayBuffer;
 }
 
-export function PdfMerger() {
+export default function PdfMerger() {
   const [pdfFiles, setPdfFiles] = useState<PdfFile[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isMerging, setIsMerging] = useState(false);

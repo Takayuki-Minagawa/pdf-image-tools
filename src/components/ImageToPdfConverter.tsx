@@ -5,7 +5,7 @@ import { imagesToPdf, loadImage } from '../utils/imagesToPdf';
 import type { ImageFile } from '../utils/imagesToPdf';
 import { Image, Download, Trash2, GripVertical, ChevronUp, ChevronDown, FileImage, ArrowDownUp } from 'lucide-react';
 
-export function ImageToPdfConverter() {
+export default function ImageToPdfConverter() {
   const [images, setImages] = useState<ImageFile[]>([]);
   const [isConverting, setIsConverting] = useState(false);
   const [progress, setProgress] = useState(0);
