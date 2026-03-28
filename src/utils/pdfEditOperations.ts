@@ -260,7 +260,9 @@ function applyHeaderFooter(
     if (settings.footer.enabled) {
       const { fontSize, fontColor, margin, marginHorizontal, left, center, right } =
         settings.footer;
-      const y = margin;
+      // drawText positions by baseline; add descent so the bottom of text aligns with margin
+      const descent = font.heightAtSize(fontSize) - font.heightAtSize(fontSize, { descender: false });
+      const y = margin + descent;
 
       const draw = (text: string, align: 'left' | 'center' | 'right') => {
         if (!text) return;
@@ -306,7 +308,8 @@ function applyPageNumbers(pdfDoc: PDFDocument, config: PageNumberingConfig, font
       const ascent = font.heightAtSize(config.fontSize, { descender: false });
       y = pageHeight - config.margin - ascent;
     } else {
-      y = config.margin;
+      const descent = font.heightAtSize(config.fontSize) - font.heightAtSize(config.fontSize, { descender: false });
+      y = config.margin + descent;
     }
 
     page.drawText(text, {
@@ -327,7 +330,7 @@ export async function applyPdfEdits(
   const pdfDoc = await PDFDocument.load(pdfBytes);
   pdfDoc.registerFontkit(fontkit);
   const fontBytes = await loadFontBytes();
-  const font = await pdfDoc.embedFont(fontBytes);
+  const font = await pdfDoc.embedFont(fontBytes, { subset: true });
 
   if (editState.textBoxes.length > 0) {
     applyTextBoxes(pdfDoc, editState.textBoxes, font);
