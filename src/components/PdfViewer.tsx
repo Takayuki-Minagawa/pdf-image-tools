@@ -35,11 +35,8 @@ interface MousePosition {
   pdfY: number;
 }
 
-interface PageThumbnail {
-  pageNumber: number;
-  dataUrl: string;
-  selected: boolean;
-}
+// サムネイルDataURLを元ページ番号でインデックスした配列
+type ThumbnailDataUrls = string[];
 
 type FitMode = 'custom' | 'fit-width' | 'fit-page';
 type ViewMode = 'viewer' | 'thumbnails';
@@ -59,10 +56,11 @@ export function PdfViewer({ file, onConvert, isConverting }: PdfViewerProps) {
   const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
   const [isLoading, setIsLoading] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>('viewer');
-  const [thumbnails, setThumbnails] = useState<PageThumbnail[]>([]);
+  const [thumbnails, setThumbnails] = useState<ThumbnailDataUrls>([]);
   const [pageOrder, setPageOrder] = useState<number[]>([]);
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const draggedIndexRef = useRef<number | null>(null);
   const [extractStart, setExtractStart] = useState<string>('');
   const [extractEnd, setExtractEnd] = useState<string>('');
   const [hasChanges, setHasChanges] = useState(false);
@@ -92,15 +90,14 @@ export function PdfViewer({ file, onConvert, isConverting }: PdfViewerProps) {
     loadPdf();
   }, [file]);
 
-  // サムネイルを生成
+  // サムネイルを生成（元ページ番号順に一度だけ生成し、表示順はpageOrderで制御）
   useEffect(() => {
     const generateThumbnails = async () => {
       if (!pdf || viewMode !== 'thumbnails') return;
 
-      const thumbs: PageThumbnail[] = [];
-      for (let i = 0; i < pageOrder.length; i++) {
-        const pageIndex = pageOrder[i];
-        const page = await pdf.getPage(pageIndex + 1);
+      const thumbs: ThumbnailDataUrls = [];
+      for (let i = 0; i < pdf.numPages; i++) {
+        const page = await pdf.getPage(i + 1);
         const viewport = page.getViewport({ scale: 0.3 });
 
         const canvas = document.createElement('canvas');
@@ -114,16 +111,12 @@ export function PdfViewer({ file, onConvert, isConverting }: PdfViewerProps) {
           canvas: canvas,
         }).promise;
 
-        thumbs.push({
-          pageNumber: pageIndex + 1,
-          dataUrl: canvas.toDataURL('image/png'),
-          selected: selectedPages.has(i),
-        });
+        thumbs.push(canvas.toDataURL('image/png'));
       }
       setThumbnails(thumbs);
     };
     generateThumbnails();
-  }, [pdf, viewMode, pageOrder, selectedPages]);
+  }, [pdf, viewMode]);
 
   // フィットモードに応じてスケールを計算
   const calculateFitScale = useCallback(async () => {
@@ -287,24 +280,30 @@ export function PdfViewer({ file, onConvert, isConverting }: PdfViewerProps) {
     }
   };
 
-  // ドラッグ&ドロップで並び替え
+  // ドラッグ&ドロップで並び替え（refで同期的に追跡し、stale closure問題を回避）
   const handleDragStart = (index: number) => {
+    draggedIndexRef.current = index;
     setDraggedIndex(index);
   };
 
   const handleDragOver = (e: React.DragEvent, index: number) => {
     e.preventDefault();
-    if (draggedIndex === null || draggedIndex === index) return;
+    const fromIndex = draggedIndexRef.current;
+    if (fromIndex === null || fromIndex === index) return;
 
-    const newOrder = [...pageOrder];
-    const [draggedItem] = newOrder.splice(draggedIndex, 1);
-    newOrder.splice(index, 0, draggedItem);
-    setPageOrder(newOrder);
+    setPageOrder(prevOrder => {
+      const newOrder = [...prevOrder];
+      const [draggedItem] = newOrder.splice(fromIndex, 1);
+      newOrder.splice(index, 0, draggedItem);
+      return newOrder;
+    });
+    draggedIndexRef.current = index;
     setDraggedIndex(index);
     setHasChanges(true);
   };
 
   const handleDragEnd = () => {
+    draggedIndexRef.current = null;
     setDraggedIndex(null);
   };
 
@@ -598,34 +597,36 @@ export function PdfViewer({ file, onConvert, isConverting }: PdfViewerProps) {
 
           {/* サムネイル一覧 */}
           <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4 p-4 bg-gray-100 rounded-lg max-h-[500px] overflow-auto">
-            {thumbnails.map((thumb, index) => (
+            {pageOrder.map((pageIndex, displayIndex) => (
               <div
-                key={`${thumb.pageNumber}-${index}`}
+                key={pageIndex}
                 draggable
-                onDragStart={() => handleDragStart(index)}
-                onDragOver={(e) => handleDragOver(e, index)}
+                onDragStart={() => handleDragStart(displayIndex)}
+                onDragOver={(e) => handleDragOver(e, displayIndex)}
                 onDragEnd={handleDragEnd}
-                onClick={() => togglePageSelection(index)}
+                onClick={() => togglePageSelection(displayIndex)}
                 className={`relative group bg-white rounded-lg shadow-md overflow-hidden cursor-pointer transition-all ${
-                  draggedIndex === index ? 'opacity-50 scale-95' : ''
-                } ${selectedPages.has(index) ? 'ring-2 ring-blue-500' : 'hover:ring-2 hover:ring-gray-300'}`}
+                  draggedIndex === displayIndex ? 'opacity-50 scale-95' : ''
+                } ${selectedPages.has(displayIndex) ? 'ring-2 ring-blue-500' : 'hover:ring-2 hover:ring-gray-300'}`}
               >
                 <div className="absolute top-1 left-1 z-10 p-1 bg-white/80 rounded shadow cursor-grab active:cursor-grabbing">
                   <GripVertical className="w-3 h-3 text-gray-500" />
                 </div>
                 <div className="absolute top-1 right-1 z-10 bg-gray-800 text-white text-xs px-1.5 py-0.5 rounded">
-                  {index + 1}
+                  {displayIndex + 1}
                 </div>
-                {selectedPages.has(index) && (
+                {selectedPages.has(displayIndex) && (
                   <div className="absolute inset-0 bg-blue-500/20 z-5" />
                 )}
-                <img
-                  src={thumb.dataUrl}
-                  alt={`Page ${index + 1}`}
-                  className="w-full h-32 object-contain bg-gray-50"
-                />
+                {thumbnails[pageIndex] && (
+                  <img
+                    src={thumbnails[pageIndex]}
+                    alt={`Page ${displayIndex + 1}`}
+                    className="w-full h-32 object-contain bg-gray-50"
+                  />
+                )}
                 <div className="p-1 text-center text-xs text-gray-500 bg-gray-50 truncate">
-                  元ページ {thumb.pageNumber}
+                  元ページ {pageIndex + 1}
                 </div>
               </div>
             ))}
