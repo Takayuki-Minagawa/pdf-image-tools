@@ -1,7 +1,7 @@
 import { PDFDocument } from 'pdf-lib';
 
 export async function deletePdfPages(
-  pdfBytes: ArrayBuffer,
+  pdfBytes: ArrayBuffer | Uint8Array,
   pageIndicesToDelete: number[]
 ): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.load(pdfBytes);
@@ -17,7 +17,7 @@ export async function deletePdfPages(
 }
 
 export async function reorderPdfPages(
-  pdfBytes: ArrayBuffer,
+  pdfBytes: ArrayBuffer | Uint8Array,
   newOrder: number[]
 ): Promise<Uint8Array> {
   const srcDoc = await PDFDocument.load(pdfBytes);
@@ -32,7 +32,7 @@ export async function reorderPdfPages(
 }
 
 export async function extractPdfPages(
-  pdfBytes: ArrayBuffer,
+  pdfBytes: ArrayBuffer | Uint8Array,
   startPage: number,
   endPage: number
 ): Promise<Uint8Array> {

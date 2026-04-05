@@ -2,10 +2,9 @@ import { useState, useCallback } from 'react';
 import { Dropzone } from './Dropzone';
 import { ProgressBar } from './ProgressBar';
 import { ImagePreview } from './ImagePreview';
-import { PdfViewer } from './PdfViewer';
 import { pdfToImages } from '../utils/pdfToImages';
 import type { ConvertedImage } from '../utils/pdfToImages';
-import { FileText, X } from 'lucide-react';
+import { Download, FileText, Layers, X } from 'lucide-react';
 
 export function PdfToImageConverter() {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
@@ -21,10 +20,12 @@ export function PdfToImageConverter() {
       setError('PDFファイルを選択してください');
       return;
     }
+
     setError(null);
     setPdfFile(file);
     setFileName(file.name);
     setImages([]);
+    setProgress(0);
   }, []);
 
   const handleConvert = useCallback(async () => {
@@ -76,7 +77,7 @@ export function PdfToImageConverter() {
           </div>
           <div>
             <h2 className="text-xl font-bold text-gray-800">PDF → 画像変換</h2>
-            <p className="text-sm text-gray-500">PDFファイルを画像（PNG）に変換します</p>
+            <p className="text-sm text-gray-500">PDFをそのままPNGに変換します</p>
           </div>
         </div>
         {pdfFile && (
@@ -99,27 +100,51 @@ export function PdfToImageConverter() {
           icon="upload"
         />
       ) : (
-        <>
-          <div className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 p-3 rounded-lg">
-            <FileText className="w-4 h-4" />
-            <span className="font-medium">{fileName}</span>
+        <div className="space-y-4">
+          <div className="flex flex-col gap-4 rounded-xl border border-blue-100 bg-blue-50/60 p-4 md:flex-row md:items-center md:justify-between">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-sm text-blue-700">
+                <FileText className="h-4 w-4" />
+                <span className="truncate font-medium">{fileName}</span>
+              </div>
+              <p className="mt-2 text-sm text-gray-600">
+                ページ削除・並び替え・PDF編集をしたい場合は「PDF編集」タブから処理してください。
+              </p>
+            </div>
+            <button
+              onClick={handleConvert}
+              disabled={isConverting}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-3 text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+            >
+              <Download className="h-4 w-4" />
+              {isConverting ? 'PNGに変換中...' : 'PNGに変換'}
+            </button>
           </div>
-          <PdfViewer 
-            file={pdfFile} 
-            onConvert={handleConvert}
-            isConverting={isConverting}
-          />
-        </>
+
+          <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+            <div className="flex items-start gap-3">
+              <div className="rounded-lg bg-white p-2 shadow-sm">
+                <Layers className="h-5 w-5 text-gray-600" />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-gray-800">変換フロー</h3>
+                <p className="mt-1 text-sm text-gray-600">
+                  この画面では元のPDFをそのままPNG化します。編集結果をPNGで出力する場合は「PDF編集」で編集後にPNG出力を使います。
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {error && (
-        <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-600">
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-600">
           {error}
         </div>
       )}
 
       {isConverting && (
-        <ProgressBar progress={progress} label="変換中..." />
+        <ProgressBar progress={progress} label="PNGに変換中..." />
       )}
 
       <ImagePreview

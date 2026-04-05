@@ -323,7 +323,7 @@ function applyPageNumbers(pdfDoc: PDFDocument, config: PageNumberingConfig, font
 }
 
 export async function applyPdfEdits(
-  pdfBytes: ArrayBuffer,
+  pdfBytes: ArrayBuffer | Uint8Array,
   editState: PdfEditState,
   fileName: string,
 ): Promise<Uint8Array> {

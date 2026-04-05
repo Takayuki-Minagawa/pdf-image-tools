@@ -11,13 +11,12 @@ export interface ConvertedImage {
   height: number;
 }
 
-export async function pdfToImages(
-  file: File,
+export async function pdfBytesToImages(
+  pdfBytes: ArrayBuffer | Uint8Array,
   scale: number = 2,
   onProgress?: (progress: number) => void
 ): Promise<ConvertedImage[]> {
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const pdf = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
   const images: ConvertedImage[] = [];
 
   for (let i = 1; i <= pdf.numPages; i++) {
@@ -49,4 +48,13 @@ export async function pdfToImages(
   }
 
   return images;
+}
+
+export async function pdfToImages(
+  file: File,
+  scale: number = 2,
+  onProgress?: (progress: number) => void
+): Promise<ConvertedImage[]> {
+  const arrayBuffer = await file.arrayBuffer();
+  return pdfBytesToImages(arrayBuffer, scale, onProgress);
 }
