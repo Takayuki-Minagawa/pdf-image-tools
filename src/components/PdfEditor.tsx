@@ -2,29 +2,15 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import {
-  ChevronLeft,
-  ChevronRight,
-  ZoomIn,
-  ZoomOut,
-  Download,
-  Type,
-  BookOpen,
-  Hash,
   RotateCcw,
   FileUp,
-  GripVertical,
-  Trash2,
-  Scissors,
-  Save,
-  Image as ImageIcon,
-  LayoutGrid,
 } from 'lucide-react';
 import { Dropzone } from './Dropzone';
-import { TextBoxEditor } from './pdfEdit/TextBoxEditor';
-import { HeaderFooterEditor } from './pdfEdit/HeaderFooterEditor';
-import { PageNumberEditor } from './pdfEdit/PageNumberEditor';
 import { ImagePreview } from './ImagePreview';
 import { ProgressBar } from './ProgressBar';
+import { PageManagementPanel } from './pdfEdit/PageManagementPanel';
+import { PdfEditorSidebar, type EditorSubTab } from './pdfEdit/PdfEditorSidebar';
+import { PdfEditorPreview } from './pdfEdit/PdfEditorPreview';
 import { applyPdfEdits, wrapTextByWidth } from '../utils/pdfEditOperations';
 import { resolvePlaceholders, formatPageNumber } from '../utils/pdfEditOperations';
 import { reorderPdfPages, extractPdfPages, downloadPdf } from '../utils/pdfEditor';
@@ -35,7 +21,6 @@ import { DEFAULT_HEADER_FOOTER, DEFAULT_PAGE_NUMBERING } from '../types/pdfEdit'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
-type SubTab = 'textbox' | 'header-footer' | 'page-number';
 type ThumbnailDataUrls = string[];
 
 function remapTextBoxesForPageOrder(
@@ -73,7 +58,7 @@ export default function PdfEditor() {
   const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
   const [pageInputValue, setPageInputValue] = useState('1');
 
-  const [activeSubTab, setActiveSubTab] = useState<SubTab>('page-number');
+  const [activeSubTab, setActiveSubTab] = useState<EditorSubTab>('page-number');
   const [textBoxes, setTextBoxes] = useState<TextBoxConfig[]>([]);
   const [headerFooter, setHeaderFooter] = useState<HeaderFooterSettings>(DEFAULT_HEADER_FOOTER);
   const [pageNumbering, setPageNumbering] = useState<PageNumberingConfig>(DEFAULT_PAGE_NUMBERING);
@@ -703,12 +688,6 @@ export default function PdfEditor() {
     );
   }
 
-  const subTabs: { key: SubTab; label: string; icon: typeof Type }[] = [
-    { key: 'textbox', label: 'テキストボックス', icon: Type },
-    { key: 'header-footer', label: 'ヘッダー/フッター', icon: BookOpen },
-    { key: 'page-number', label: 'ページ番号', icon: Hash },
-  ];
-
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 p-3">
@@ -732,278 +711,67 @@ export default function PdfEditor() {
         </button>
       </div>
 
-      <div className="rounded-xl border border-gray-200">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-4 py-3">
-          <div>
-            <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
-              <LayoutGrid className="h-4 w-4 text-amber-600" />
-              ページ編集
-            </div>
-            <p className="mt-1 text-sm text-gray-500">
-              並び替え・削除は編集済みPDF保存とPNG出力の両方に反映されます。
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={toggleSelectAll}
-              className="rounded-lg bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm ring-1 ring-gray-200 transition-colors hover:bg-gray-50"
-            >
-              {selectedPages.size === displayPageCount ? '選択解除' : '全選択'}
-            </button>
-            <button
-              onClick={deleteSelectedPages}
-              disabled={selectedPages.size === 0}
-              className="flex items-center gap-2 rounded-lg bg-red-100 px-3 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-200 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Trash2 className="h-4 w-4" />
-              削除
-            </button>
-            {hasPageChanges && (
-              <button
-                onClick={resetPageChanges}
-                className="flex items-center gap-2 rounded-lg bg-gray-200 px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-300"
-              >
-                <RotateCcw className="h-4 w-4" />
-                ページ編集をリセット
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3 border-b border-gray-200 bg-gray-50 px-4 py-3">
-          <Scissors className="h-5 w-5 text-purple-600" />
-          <span className="text-sm font-medium text-purple-700">抽出</span>
-          <input
-            type="number"
-            min={1}
-            max={displayPageCount}
-            value={extractStart}
-            onChange={(e) => setExtractStart(e.target.value)}
-            placeholder="開始"
-            className="w-20 rounded-lg border border-purple-300 px-2 py-1 text-sm"
-          />
-          <span className="text-gray-500">〜</span>
-          <input
-            type="number"
-            min={1}
-            max={displayPageCount}
-            value={extractEnd}
-            onChange={(e) => setExtractEnd(e.target.value)}
-            placeholder="終了"
-            className="w-20 rounded-lg border border-purple-300 px-2 py-1 text-sm"
-          />
-          <span className="text-sm text-gray-500">現在の並び順でPDFを抽出</span>
-          <button
-            onClick={handleExtract}
-            disabled={!extractStart || !extractEnd}
-            className="flex items-center gap-2 rounded-lg bg-purple-600 px-3 py-1.5 text-sm text-white transition-colors hover:bg-purple-700 disabled:opacity-50"
-          >
-            <Download className="h-4 w-4" />
-            抽出
-          </button>
-        </div>
-
-        <div className="p-4">
-          {isGeneratingThumbnails ? (
-            <div className="rounded-lg bg-gray-50 p-6 text-center text-sm text-gray-500">
-              サムネイルを生成中...
-            </div>
-          ) : (
-            <div className="grid max-h-[380px] grid-cols-3 gap-4 overflow-auto rounded-lg bg-gray-100 p-4 md:grid-cols-4 lg:grid-cols-6">
-              {pageOrder.map((pageIndex, displayIndex) => (
-                <div
-                  key={pageIndex}
-                  draggable
-                  onDragStart={() => handleDragStart(displayIndex)}
-                  onDragOver={(e) => handleDragOver(e, displayIndex)}
-                  onDragEnd={handleDragEnd}
-                  onClick={() => togglePageSelection(displayIndex)}
-                  className={`relative cursor-pointer overflow-hidden rounded-lg bg-white shadow-md transition-all ${
-                    draggedIndex === displayIndex ? 'scale-95 opacity-50' : ''
-                  } ${
-                    selectedPages.has(displayIndex)
-                      ? 'ring-2 ring-amber-500'
-                      : 'hover:ring-2 hover:ring-gray-300'
-                  }`}
-                >
-                  <div className="absolute left-1 top-1 z-10 rounded bg-white/80 p-1 shadow">
-                    <GripVertical className="h-3 w-3 text-gray-500" />
-                  </div>
-                  <div className="absolute right-1 top-1 z-10 rounded bg-gray-800 px-1.5 py-0.5 text-xs text-white">
-                    {displayIndex + 1}
-                  </div>
-                  {selectedPages.has(displayIndex) && (
-                    <div className="absolute inset-0 z-[5] bg-amber-500/15" />
-                  )}
-                  {thumbnails[pageIndex] && (
-                    <img
-                      src={thumbnails[pageIndex]}
-                      alt={`Page ${displayIndex + 1}`}
-                      className="h-32 w-full bg-gray-50 object-contain"
-                    />
-                  )}
-                  <div className="truncate bg-gray-50 p-1 text-center text-xs text-gray-500">
-                    元ページ {pageIndex + 1}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
+      <PageManagementPanel
+        displayPageCount={displayPageCount}
+        selectedPages={selectedPages}
+        hasPageChanges={hasPageChanges}
+        extractStart={extractStart}
+        extractEnd={extractEnd}
+        isGeneratingThumbnails={isGeneratingThumbnails}
+        pageOrder={pageOrder}
+        thumbnails={thumbnails}
+        draggedIndex={draggedIndex}
+        onToggleSelectAll={toggleSelectAll}
+        onDeleteSelectedPages={deleteSelectedPages}
+        onResetPageChanges={resetPageChanges}
+        onExtractStartChange={setExtractStart}
+        onExtractEndChange={setExtractEnd}
+        onExtract={handleExtract}
+        onDragStart={handleDragStart}
+        onDragOver={handleDragOver}
+        onDragEnd={handleDragEnd}
+        onTogglePageSelection={togglePageSelection}
+      />
 
       <div className="flex flex-col gap-4 lg:flex-row">
-        <div className="shrink-0 space-y-3 lg:w-80">
-          <div className="flex overflow-hidden rounded-lg border border-gray-200">
-            {subTabs.map((tab) => {
-              const Icon = tab.icon;
-              return (
-                <button
-                  key={tab.key}
-                  onClick={() => setActiveSubTab(tab.key)}
-                  className={`flex flex-1 items-center justify-center gap-1 px-2 py-2.5 text-xs font-medium transition-colors ${
-                    activeSubTab === tab.key
-                      ? 'bg-amber-500 text-white'
-                      : 'text-gray-600 hover:bg-gray-50'
-                  }`}
-                >
-                  <Icon className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">{tab.label}</span>
-                </button>
-              );
-            })}
-          </div>
+        <PdfEditorSidebar
+          activeSubTab={activeSubTab}
+          onActiveSubTabChange={setActiveSubTab}
+          textBoxes={textBoxes}
+          onTextBoxesChange={setTextBoxes}
+          totalPages={displayPageCount}
+          activeTextBoxId={activeTextBoxId}
+          onActiveTextBoxChange={setActiveTextBoxId}
+          headerFooter={headerFooter}
+          onHeaderFooterChange={setHeaderFooter}
+          pageNumbering={pageNumbering}
+          onPageNumberingChange={setPageNumbering}
+          onSavePdf={handleSavePdf}
+          onExportPng={handleExportPng}
+          isSavingPdf={isSavingPdf}
+          isExportingPng={isExportingPng}
+        />
 
-          <div className="max-h-[500px] overflow-auto rounded-lg border border-gray-200 p-3">
-            {activeSubTab === 'textbox' && (
-              <TextBoxEditor
-                textBoxes={textBoxes}
-                onChange={setTextBoxes}
-                totalPages={displayPageCount}
-                activeTextBoxId={activeTextBoxId}
-                onActiveChange={setActiveTextBoxId}
-              />
-            )}
-            {activeSubTab === 'header-footer' && (
-              <HeaderFooterEditor settings={headerFooter} onChange={setHeaderFooter} />
-            )}
-            {activeSubTab === 'page-number' && (
-              <PageNumberEditor
-                config={pageNumbering}
-                onChange={setPageNumbering}
-                totalPages={displayPageCount}
-              />
-            )}
-          </div>
-
-          <div className="space-y-2">
-            <button
-              onClick={handleSavePdf}
-              disabled={isSavingPdf || isExportingPng}
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-600 px-4 py-3 font-medium text-white transition-colors hover:bg-amber-700 disabled:opacity-50"
-            >
-              <Save className="h-5 w-5" />
-              {isSavingPdf ? 'PDFを保存中...' : '編集済みPDFを保存'}
-            </button>
-            <button
-              onClick={handleExportPng}
-              disabled={isSavingPdf || isExportingPng}
-              className="flex w-full items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 font-medium text-blue-700 transition-colors hover:bg-blue-100 disabled:opacity-50"
-            >
-              <ImageIcon className="h-5 w-5" />
-              {isExportingPng ? 'PNGを生成中...' : '編集結果をPNGで出力'}
-            </button>
-            <p className="text-xs text-gray-500">
-              メイン出力はPDF保存です。必要な場合のみ同じ編集結果をPNGに変換できます。
-            </p>
-          </div>
-        </div>
-
-        <div className="min-w-0 flex-1 space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-gray-100 p-3">
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-                disabled={currentPage <= 1}
-                className="rounded-lg bg-white p-1.5 shadow-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </button>
-              <div className="flex items-center gap-1 text-sm">
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  value={pageInputValue}
-                  onChange={(e) => setPageInputValue(e.target.value)}
-                  onBlur={handlePageInputCommit}
-                  onKeyDown={handlePageInputKeyDown}
-                  className="w-10 rounded-md border border-gray-300 bg-white px-1 py-0.5 text-center text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
-                />
-                <span className="text-gray-500">/ {displayPageCount}</span>
-              </div>
-              <button
-                onClick={() => setCurrentPage((page) => Math.min(displayPageCount, page + 1))}
-                disabled={currentPage >= displayPageCount}
-                className="rounded-lg bg-white p-1.5 shadow-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </button>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setScale((value) => Math.max(0.25, value - 0.25))}
-                disabled={scale <= 0.25}
-                className="rounded-lg bg-white p-1.5 shadow-sm hover:bg-gray-50 disabled:opacity-50"
-              >
-                <ZoomOut className="h-4 w-4" />
-              </button>
-              <select
-                value={scale}
-                onChange={(e) => setScale(parseFloat(e.target.value))}
-                className="min-w-[80px] rounded-lg border border-gray-300 bg-white px-2 py-1 text-sm"
-              >
-                {[0.5, 0.75, 1, 1.25, 1.5, 2].map((value) => (
-                  <option key={value} value={value}>
-                    {Math.round(value * 100)}%
-                  </option>
-                ))}
-              </select>
-              <button
-                onClick={() => setScale((value) => Math.min(3, value + 0.25))}
-                disabled={scale >= 3}
-                className="rounded-lg bg-white p-1.5 shadow-sm hover:bg-gray-50 disabled:opacity-50"
-              >
-                <ZoomIn className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-
-          <div
-            ref={containerRef}
-            className="max-h-[600px] overflow-auto rounded-lg bg-gray-200 p-4"
-          >
-            <div className="flex justify-center">
-              <div className="relative inline-block">
-                <canvas ref={canvasRef} className="bg-white shadow-lg" />
-                <canvas
-                  ref={overlayCanvasRef}
-                  onClick={handleCanvasClick}
-                  className={`absolute inset-0 ${
-                    activeTextBoxId && activeSubTab === 'textbox'
-                      ? 'cursor-crosshair'
-                      : 'pointer-events-none'
-                  }`}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="text-center text-xs text-gray-500">
-            ページサイズ: {Math.round(pageSize.width)} x {Math.round(pageSize.height)} pt |
-            ズーム: {Math.round(scale * 100)}%
-          </div>
-        </div>
+        <PdfEditorPreview
+          currentPage={currentPage}
+          displayPageCount={displayPageCount}
+          pageInputValue={pageInputValue}
+          onPageInputValueChange={setPageInputValue}
+          onPageInputCommit={handlePageInputCommit}
+          onPageInputKeyDown={handlePageInputKeyDown}
+          onPrevPage={() => setCurrentPage((page) => Math.max(1, page - 1))}
+          onNextPage={() => setCurrentPage((page) => Math.min(displayPageCount, page + 1))}
+          scale={scale}
+          onZoomOut={() => setScale((value) => Math.max(0.25, value - 0.25))}
+          onZoomIn={() => setScale((value) => Math.min(3, value + 0.25))}
+          onScaleChange={setScale}
+          containerRef={containerRef}
+          canvasRef={canvasRef}
+          overlayCanvasRef={overlayCanvasRef}
+          onCanvasClick={handleCanvasClick}
+          isTextPlacementActive={Boolean(activeTextBoxId && activeSubTab === 'textbox')}
+          pageSize={pageSize}
+        />
       </div>
 
       {outputError && (

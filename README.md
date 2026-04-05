@@ -96,7 +96,10 @@ src/
 │   └── pdfEdit/
 │       ├── TextBoxEditor.tsx       # テキストボックス設定パネル
 │       ├── HeaderFooterEditor.tsx  # ヘッダー/フッター設定パネル
-│       └── PageNumberEditor.tsx    # ページ番号設定パネル
+│       ├── PageNumberEditor.tsx    # ページ番号設定パネル
+│       ├── PageManagementPanel.tsx # ページ削除・並び替え・抽出パネル
+│       ├── PdfEditorSidebar.tsx    # PDF編集サイドバー
+│       └── PdfEditorPreview.tsx    # PDF編集プレビュー
 ├── hooks/
 │   └── useDropzone.ts          # ドラッグ＆ドロップフック
 ├── types/
