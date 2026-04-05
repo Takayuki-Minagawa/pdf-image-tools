@@ -1,15 +1,14 @@
 import { useState, lazy, Suspense } from 'react';
-import { PdfToImageConverter } from './components/PdfToImageConverter';
 import { FileText, Image, Github, Combine, Pencil } from 'lucide-react';
 
 const ImageToPdfConverter = lazy(() => import('./components/ImageToPdfConverter'));
 const PdfMerger = lazy(() => import('./components/PdfMerger'));
 const PdfEditor = lazy(() => import('./components/PdfEditor'));
 
-type Tab = 'pdf-to-image' | 'image-to-pdf' | 'pdf-merge' | 'pdf-edit';
+type Tab = 'image-to-pdf' | 'pdf-merge' | 'pdf-edit';
 
 function App() {
-  const [activeTab, setActiveTab] = useState<Tab>('pdf-to-image');
+  const [activeTab, setActiveTab] = useState<Tab>('pdf-edit');
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
@@ -41,26 +40,15 @@ function App() {
         <div className="bg-white rounded-2xl shadow-lg overflow-hidden">
           <div className="flex border-b border-gray-200">
             <button
-              onClick={() => setActiveTab('pdf-to-image')}
+              onClick={() => setActiveTab('pdf-edit')}
               className={`flex-1 flex items-center justify-center gap-2 px-4 py-4 text-sm font-medium transition-colors ${
-                activeTab === 'pdf-to-image'
-                  ? 'bg-blue-50 text-blue-600 border-b-2 border-blue-600'
+                activeTab === 'pdf-edit'
+                  ? 'bg-amber-50 text-amber-600 border-b-2 border-amber-600'
                   : 'text-gray-600 hover:bg-gray-50'
               }`}
             >
-              <FileText className="w-5 h-5" />
-              PDF → 画像
-            </button>
-            <button
-              onClick={() => setActiveTab('image-to-pdf')}
-              className={`flex-1 flex items-center justify-center gap-2 px-4 py-4 text-sm font-medium transition-colors ${
-                activeTab === 'image-to-pdf'
-                  ? 'bg-green-50 text-green-600 border-b-2 border-green-600'
-                  : 'text-gray-600 hover:bg-gray-50'
-              }`}
-            >
-              <Image className="w-5 h-5" />
-              画像 → PDF
+              <Pencil className="w-5 h-5" />
+              PDF編集
             </button>
             <button
               onClick={() => setActiveTab('pdf-merge')}
@@ -74,28 +62,26 @@ function App() {
               PDF結合
             </button>
             <button
-              onClick={() => setActiveTab('pdf-edit')}
+              onClick={() => setActiveTab('image-to-pdf')}
               className={`flex-1 flex items-center justify-center gap-2 px-4 py-4 text-sm font-medium transition-colors ${
-                activeTab === 'pdf-edit'
-                  ? 'bg-amber-50 text-amber-600 border-b-2 border-amber-600'
+                activeTab === 'image-to-pdf'
+                  ? 'bg-green-50 text-green-600 border-b-2 border-green-600'
                   : 'text-gray-600 hover:bg-gray-50'
               }`}
             >
-              <Pencil className="w-5 h-5" />
-              PDF編集
+              <Image className="w-5 h-5" />
+              画像 → PDF
             </button>
           </div>
 
           <div className="p-6">
             <Suspense fallback={<div className="flex items-center justify-center h-64 text-gray-500">読み込み中...</div>}>
-              {activeTab === 'pdf-to-image' ? (
-                <PdfToImageConverter />
-              ) : activeTab === 'image-to-pdf' ? (
-                <ImageToPdfConverter />
+              {activeTab === 'pdf-edit' ? (
+                <PdfEditor />
               ) : activeTab === 'pdf-merge' ? (
                 <PdfMerger />
               ) : (
-                <PdfEditor />
+                <ImageToPdfConverter />
               )}
             </Suspense>
           </div>
