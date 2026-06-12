@@ -19,6 +19,7 @@ interface PdfEditorPreviewProps {
   overlayCanvasRef: RefObject<HTMLCanvasElement | null>;
   onCanvasClick: (e: MouseEvent<HTMLCanvasElement>) => void;
   isTextPlacementActive: boolean;
+  isContentSelectionActive: boolean;
   pageSize: { width: number; height: number };
 }
 
@@ -42,6 +43,7 @@ export function PdfEditorPreview({
   overlayCanvasRef,
   onCanvasClick,
   isTextPlacementActive,
+  isContentSelectionActive,
   pageSize,
 }: PdfEditorPreviewProps) {
   return (
@@ -116,7 +118,11 @@ export function PdfEditorPreview({
               ref={overlayCanvasRef}
               onClick={onCanvasClick}
               className={`absolute inset-0 ${
-                isTextPlacementActive ? 'cursor-crosshair' : 'pointer-events-none'
+                isTextPlacementActive
+                  ? 'cursor-crosshair'
+                  : isContentSelectionActive
+                    ? 'cursor-pointer'
+                    : 'pointer-events-none'
               }`}
             />
           </div>

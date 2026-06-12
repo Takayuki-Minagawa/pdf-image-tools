@@ -9,7 +9,7 @@ import type {
 } from '../types/pdfEdit';
 import { loadFontBytes } from './fontLoader';
 
-function toRgb(hex: string) {
+export function toRgb(hex: string) {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
   if (!result) return rgb(0, 0, 0);
   return rgb(
@@ -233,12 +233,20 @@ function applyHeaderFooter(
     const { width: pageWidth, height: pageHeight } = page.getSize();
     const pageNum = i + 1;
 
-    if (settings.header.enabled) {
-      const { fontSize, fontColor, margin, marginHorizontal, left, center, right } =
-        settings.header;
-      // drawText positions by baseline; subtract ascent so the top of text aligns with margin
-      const ascent = font.heightAtSize(fontSize, { descender: false });
-      const y = pageHeight - margin - ascent;
+    const drawSection = (config: HeaderFooterSettings['header'], isHeader: boolean) => {
+      const { fontSize, fontColor, margin, marginHorizontal, left, center, right } = config;
+
+      // drawText positions by baseline; offset by ascent (header) / descent (footer)
+      // so the text edge aligns with the margin
+      let y: number;
+      if (isHeader) {
+        const ascent = font.heightAtSize(fontSize, { descender: false });
+        y = pageHeight - margin - ascent;
+      } else {
+        const descent =
+          font.heightAtSize(fontSize) - font.heightAtSize(fontSize, { descender: false });
+        y = margin + descent;
+      }
 
       const draw = (text: string, align: 'left' | 'center' | 'right') => {
         if (!text) return;
@@ -255,31 +263,10 @@ function applyHeaderFooter(
       draw(left, 'left');
       draw(center, 'center');
       draw(right, 'right');
-    }
+    };
 
-    if (settings.footer.enabled) {
-      const { fontSize, fontColor, margin, marginHorizontal, left, center, right } =
-        settings.footer;
-      // drawText positions by baseline; add descent so the bottom of text aligns with margin
-      const descent = font.heightAtSize(fontSize) - font.heightAtSize(fontSize, { descender: false });
-      const y = margin + descent;
-
-      const draw = (text: string, align: 'left' | 'center' | 'right') => {
-        if (!text) return;
-        const resolved = resolvePlaceholders(text, pageNum, pageCount, fileName);
-        const textWidth = font.widthOfTextAtSize(resolved, fontSize);
-        let x: number;
-        if (align === 'left') x = marginHorizontal;
-        else if (align === 'center') x = (pageWidth - textWidth) / 2;
-        else x = pageWidth - marginHorizontal - textWidth;
-
-        page.drawText(resolved, { x, y, size: fontSize, font, color: toRgb(fontColor) });
-      };
-
-      draw(left, 'left');
-      draw(center, 'center');
-      draw(right, 'right');
-    }
+    if (settings.header.enabled) drawSection(settings.header, true);
+    if (settings.footer.enabled) drawSection(settings.footer, false);
   }
 }
 

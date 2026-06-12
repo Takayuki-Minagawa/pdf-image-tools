@@ -1,6 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
-import * as pdfjsLib from 'pdfjs-dist';
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   RotateCcw,
   FileUp,
@@ -11,51 +9,39 @@ import { ProgressBar } from './ProgressBar';
 import { PageManagementPanel } from './pdfEdit/PageManagementPanel';
 import { PdfEditorSidebar, type EditorSubTab } from './pdfEdit/PdfEditorSidebar';
 import { PdfEditorPreview } from './pdfEdit/PdfEditorPreview';
-import { applyPdfEdits, wrapTextByWidth } from '../utils/pdfEditOperations';
-import { resolvePlaceholders, formatPageNumber } from '../utils/pdfEditOperations';
+import { applyPdfEdits } from '../utils/pdfEditOperations';
 import { reorderPdfPages, extractPdfPages, downloadPdf } from '../utils/pdfEditor';
 import { pdfBytesToImages } from '../utils/pdfToImages';
+import { usePdfDocument } from '../hooks/usePdfDocument';
+import { remapTextBoxesForPageOrder, isIdentityPageOrder } from '../utils/pageOrderUtils';
+import {
+  drawTextBoxesOverlay,
+  drawHeaderFooterOverlay,
+  drawPageNumberOverlay,
+  drawRecognizedItemsOverlay,
+  drawContentEditsOverlay,
+  type OverlayContext,
+} from '../utils/overlayRenderer';
+import { recognizePageContent, hitTestRecognizedItems } from '../utils/contentRecognition';
+import { applyContentEdits } from '../utils/contentEditOperations';
 import type { ConvertedImage } from '../utils/pdfToImages';
 import type { TextBoxConfig, HeaderFooterSettings, PageNumberingConfig } from '../types/pdfEdit';
 import { DEFAULT_HEADER_FOOTER, DEFAULT_PAGE_NUMBERING } from '../types/pdfEdit';
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
-
-type ThumbnailDataUrls = string[];
-
-function remapTextBoxesForPageOrder(
-  textBoxes: TextBoxConfig[],
-  prevOrder: number[],
-  nextOrder: number[],
-) {
-  return textBoxes.flatMap((box) => {
-    if (box.pageIndex === -1) return [box];
-
-    const originalPageIndex = prevOrder[box.pageIndex];
-    if (originalPageIndex === undefined) return [];
-
-    const nextDisplayIndex = nextOrder.indexOf(originalPageIndex);
-    if (nextDisplayIndex === -1) return [];
-
-    return [{ ...box, pageIndex: nextDisplayIndex }];
-  });
-}
-
-function isIdentityPageOrder(pageOrder: number[]) {
-  return pageOrder.every((pageIndex, index) => pageIndex === index);
-}
+import type { ContentEdit, RecognizedItem } from '../types/contentEdit';
+import type { PageViewport } from 'pdfjs-dist';
 
 export default function PdfEditor() {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
-  const [pdfBytes, setPdfBytes] = useState<ArrayBuffer | null>(null);
-  const [pdf, setPdf] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
-  const [originalTotalPages, setOriginalTotalPages] = useState(0);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isGeneratingThumbnails, setIsGeneratingThumbnails] = useState(false);
+  const { pdf, pdfBytes, isLoading, thumbnails, isGeneratingThumbnails } =
+    usePdfDocument(pdfFile);
+  const originalTotalPages = pdf?.numPages ?? 0;
 
   const [currentPage, setCurrentPage] = useState(1);
   const [scale, setScale] = useState(1);
   const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
+  // 表示中ページのviewport。ユーザー空間⇔キャンバス座標の変換に使う
+  // （CropBox原点や回転を考慮するため、scaleによる単純な換算では不十分）。
+  const [pageViewport, setPageViewport] = useState<PageViewport | null>(null);
   const [pageInputValue, setPageInputValue] = useState('1');
 
   const [activeSubTab, setActiveSubTab] = useState<EditorSubTab>('page-number');
@@ -64,7 +50,13 @@ export default function PdfEditor() {
   const [pageNumbering, setPageNumbering] = useState<PageNumberingConfig>(DEFAULT_PAGE_NUMBERING);
   const [activeTextBoxId, setActiveTextBoxId] = useState<string | null>(null);
 
-  const [thumbnails, setThumbnails] = useState<ThumbnailDataUrls>([]);
+  const [contentEdits, setContentEdits] = useState<ContentEdit[]>([]);
+  const [recognizedByPage, setRecognizedByPage] = useState<Map<number, RecognizedItem[]>>(
+    new Map(),
+  );
+  const [isRecognizing, setIsRecognizing] = useState(false);
+  const [selectedContentId, setSelectedContentId] = useState<string | null>(null);
+
   const [pageOrder, setPageOrder] = useState<number[]>([]);
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
@@ -84,6 +76,18 @@ export default function PdfEditor() {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const displayPageCount = pageOrder.length;
+  const currentOriginalPageIndex = pageOrder[currentPage - 1] ?? -1;
+  const currentPageItems =
+    currentOriginalPageIndex >= 0
+      ? (recognizedByPage.get(currentOriginalPageIndex) ?? null)
+      : null;
+  const selectedContentItem = selectedContentId
+    ? (currentPageItems?.find((item) => item.id === selectedContentId) ?? null)
+    : null;
+  const currentPageContentEdits = useMemo(
+    () => contentEdits.filter((edit) => edit.target.pageIndex === currentOriginalPageIndex),
+    [contentEdits, currentOriginalPageIndex],
+  );
   const hasPageChanges =
     pageOrder.length > 0 &&
     (pageOrder.length !== originalTotalPages || !isIdentityPageOrder(pageOrder));
@@ -98,74 +102,54 @@ export default function PdfEditor() {
   }, [pageOrder]);
 
   useEffect(() => {
-    if (!pdfFile) return;
+    if (!pdf) {
+      setPageOrder([]);
+      return;
+    }
 
-    const loadPdf = async () => {
-      setIsLoading(true);
-      setOutputError(null);
-      setPngImages([]);
-      setPngProgress(0);
+    setPageOrder(Array.from({ length: pdf.numPages }, (_, index) => index));
+    setSelectedPages(new Set());
+    setCurrentPage(1);
+    setPageInputValue('1');
+    setExtractStart('');
+    setExtractEnd('');
+    setContentEdits([]);
+    setRecognizedByPage(new Map());
+    setSelectedContentId(null);
+    setPageViewport(null);
+  }, [pdf]);
 
-      const arrayBuffer = await pdfFile.arrayBuffer();
-      const bufferCopy = arrayBuffer.slice(0);
-      const pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-      const order = Array.from({ length: pdfDoc.numPages }, (_, index) => index);
-
-      setPdfBytes(bufferCopy);
-      setPdf(pdfDoc);
-      setOriginalTotalPages(pdfDoc.numPages);
-      setPageOrder(order);
-      setThumbnails([]);
-      setSelectedPages(new Set());
-      setCurrentPage(1);
-      setPageInputValue('1');
-      setExtractStart('');
-      setExtractEnd('');
-      setIsLoading(false);
-    };
-
-    loadPdf();
-  }, [pdfFile]);
-
+  // コンテンツ編集タブで表示中のページを解析する（ページ単位でキャッシュ）
   useEffect(() => {
-    if (!pdf) return;
+    if (activeSubTab !== 'content' || !pdf || currentOriginalPageIndex < 0) return;
+    if (recognizedByPage.has(currentOriginalPageIndex)) return;
 
     let cancelled = false;
 
-    const generateThumbnails = async () => {
-      setIsGeneratingThumbnails(true);
-
-      const nextThumbnails: ThumbnailDataUrls = [];
-      for (let index = 0; index < pdf.numPages; index++) {
-        const page = await pdf.getPage(index + 1);
-        const viewport = page.getViewport({ scale: 0.3 });
-
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d')!;
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-
-        await page.render({
-          canvasContext: context,
-          viewport,
-          canvas,
-        }).promise;
-
-        nextThumbnails.push(canvas.toDataURL('image/png'));
-      }
-
-      if (!cancelled) {
-        setThumbnails(nextThumbnails);
-        setIsGeneratingThumbnails(false);
+    const recognize = async () => {
+      setIsRecognizing(true);
+      try {
+        const page = await pdf.getPage(currentOriginalPageIndex + 1);
+        const items = await recognizePageContent(page);
+        if (!cancelled) {
+          setRecognizedByPage((prev) => new Map(prev).set(currentOriginalPageIndex, items));
+        }
+      } catch (err) {
+        console.error(err);
+        if (!cancelled) {
+          setRecognizedByPage((prev) => new Map(prev).set(currentOriginalPageIndex, []));
+        }
+      } finally {
+        if (!cancelled) setIsRecognizing(false);
       }
     };
 
-    generateThumbnails();
+    recognize();
 
     return () => {
       cancelled = true;
     };
-  }, [pdf]);
+  }, [activeSubTab, pdf, currentOriginalPageIndex, recognizedByPage]);
 
   useEffect(() => {
     const renderPage = async () => {
@@ -183,6 +167,7 @@ export default function PdfEditor() {
 
       const originalViewport = page.getViewport({ scale: 1 });
       setPageSize({ width: originalViewport.width, height: originalViewport.height });
+      setPageViewport(viewport);
 
       await page.render({
         canvasContext: context,
@@ -204,157 +189,35 @@ export default function PdfEditor() {
   }, [pageSize, scale]);
 
   const drawOverlay = useCallback(() => {
-    const overlay = overlayCanvasRef.current;
-    if (!overlay || pageSize.width === 0) return;
+    const overlayCanvas = overlayCanvasRef.current;
+    if (!overlayCanvas || pageSize.width === 0) return;
 
-    const ctx = overlay.getContext('2d')!;
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    const ctx = overlayCanvas.getContext('2d')!;
+    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 
-    for (const box of textBoxes) {
-      if (box.pageIndex !== -1 && box.pageIndex !== currentPage - 1) continue;
+    const overlay: OverlayContext = {
+      ctx,
+      scale,
+      canvasWidth: overlayCanvas.width,
+      canvasHeight: overlayCanvas.height,
+      viewport: pageViewport,
+    };
 
-      const x = box.x * scale;
-      const y = box.y * scale;
-      const width = box.width * scale;
-      const height = box.height * scale;
-
-      if (box.backgroundColor !== 'transparent' && box.backgroundColor !== '') {
-        ctx.fillStyle = box.backgroundColor;
-        ctx.globalAlpha = 0.8;
-        ctx.fillRect(x, y, width, height);
-        ctx.globalAlpha = 1;
-      }
-
-      if (box.borderStyle !== 'none' && box.borderWidth > 0) {
-        ctx.strokeStyle = box.borderColor;
-        ctx.lineWidth = box.borderWidth * scale;
-        if (box.borderStyle === 'dashed') ctx.setLineDash([5 * scale, 5 * scale]);
-        else if (box.borderStyle === 'dotted') ctx.setLineDash([2 * scale, 2 * scale]);
-        else ctx.setLineDash([]);
-        ctx.strokeRect(x, y, width, height);
-        ctx.setLineDash([]);
-      }
-
-      if (box.id === activeTextBoxId) {
-        ctx.strokeStyle = '#f59e0b';
-        ctx.lineWidth = 2;
-        ctx.setLineDash([4, 4]);
-        ctx.strokeRect(x - 2, y - 2, width + 4, height + 4);
-        ctx.setLineDash([]);
-      }
-
-      if (box.text) {
-        ctx.fillStyle = box.fontColor;
-        ctx.font = `${box.fontSize * scale}px sans-serif`;
-        ctx.textBaseline = 'top';
-        const padding = 4 * scale;
-        const maxTextWidth = width - padding * 2;
-        const lines = wrapTextByWidth(
-          box.text,
-          (text) => ctx.measureText(text).width,
-          maxTextWidth,
-        );
-        const lineHeight = box.fontSize * 1.3 * scale;
-
-        for (let index = 0; index < lines.length; index++) {
-          const textY = y + padding + index * lineHeight;
-          if (textY + lineHeight > y + height) break;
-          ctx.fillText(lines[index], x + padding, textY);
-        }
-      }
+    // コンテンツ編集（カバー+再描画）は元ページ内容の変更を模すため最初に描く
+    drawContentEditsOverlay(overlay, currentPageContentEdits);
+    if (activeSubTab === 'content' && currentPageItems) {
+      drawRecognizedItemsOverlay(overlay, currentPageItems, selectedContentId);
     }
 
-    const canvasWidth = overlay.width;
-    const canvasHeight = overlay.height;
-    const fileName = pdfFile?.name || '';
-
-    if (headerFooter.header.enabled) {
-      const header = headerFooter.header;
-      const y = header.margin * scale;
-      ctx.fillStyle = header.fontColor;
-      ctx.font = `${header.fontSize * scale}px sans-serif`;
-      ctx.textBaseline = 'top';
-
-      const resolve = (text: string) =>
-        resolvePlaceholders(text, currentPage, displayPageCount, fileName);
-
-      if (header.left) {
-        ctx.textAlign = 'left';
-        ctx.fillText(resolve(header.left), header.marginHorizontal * scale, y);
-      }
-      if (header.center) {
-        ctx.textAlign = 'center';
-        ctx.fillText(resolve(header.center), canvasWidth / 2, y);
-      }
-      if (header.right) {
-        ctx.textAlign = 'right';
-        ctx.fillText(resolve(header.right), canvasWidth - header.marginHorizontal * scale, y);
-      }
-      ctx.textAlign = 'left';
-    }
-
-    if (headerFooter.footer.enabled) {
-      const footer = headerFooter.footer;
-      const y = canvasHeight - footer.margin * scale;
-      ctx.fillStyle = footer.fontColor;
-      ctx.font = `${footer.fontSize * scale}px sans-serif`;
-      ctx.textBaseline = 'bottom';
-
-      const resolve = (text: string) =>
-        resolvePlaceholders(text, currentPage, displayPageCount, fileName);
-
-      if (footer.left) {
-        ctx.textAlign = 'left';
-        ctx.fillText(resolve(footer.left), footer.marginHorizontal * scale, y);
-      }
-      if (footer.center) {
-        ctx.textAlign = 'center';
-        ctx.fillText(resolve(footer.center), canvasWidth / 2, y);
-      }
-      if (footer.right) {
-        ctx.textAlign = 'right';
-        ctx.fillText(resolve(footer.right), canvasWidth - footer.marginHorizontal * scale, y);
-      }
-      ctx.textAlign = 'left';
-    }
-
-    if (pageNumbering.enabled && currentPage >= pageNumbering.startPage) {
-      const displayNumber = pageNumbering.startNumber + (currentPage - pageNumbering.startPage);
-      const text = formatPageNumber(
-        displayNumber,
-        pageNumbering.format,
-        pageNumbering.prefix,
-        pageNumbering.suffix,
-      );
-
-      ctx.fillStyle = pageNumbering.fontColor;
-      ctx.font = `${pageNumbering.fontSize * scale}px sans-serif`;
-
-      let x: number;
-      if (pageNumbering.position.includes('left')) {
-        ctx.textAlign = 'left';
-        x = pageNumbering.margin * scale;
-      } else if (pageNumbering.position.includes('right')) {
-        ctx.textAlign = 'right';
-        x = canvasWidth - pageNumbering.margin * scale;
-      } else {
-        ctx.textAlign = 'center';
-        x = canvasWidth / 2;
-      }
-
-      let y: number;
-      if (pageNumbering.position.startsWith('top')) {
-        ctx.textBaseline = 'top';
-        y = pageNumbering.margin * scale;
-      } else {
-        ctx.textBaseline = 'bottom';
-        y = canvasHeight - pageNumbering.margin * scale;
-      }
-
-      ctx.fillText(text, x, y);
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-    }
+    drawTextBoxesOverlay(overlay, textBoxes, currentPage - 1, activeTextBoxId);
+    drawHeaderFooterOverlay(
+      overlay,
+      headerFooter,
+      currentPage,
+      displayPageCount,
+      pdfFile?.name || '',
+    );
+    drawPageNumberOverlay(overlay, pageNumbering, currentPage);
   }, [
     textBoxes,
     headerFooter,
@@ -363,8 +226,13 @@ export default function PdfEditor() {
     displayPageCount,
     scale,
     pageSize,
+    pageViewport,
     pdfFile,
     activeTextBoxId,
+    activeSubTab,
+    currentPageItems,
+    currentPageContentEdits,
+    selectedContentId,
   ]);
 
   useEffect(() => {
@@ -409,11 +277,22 @@ export default function PdfEditor() {
 
   const handleCanvasClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      if (!activeTextBoxId || activeSubTab !== 'textbox') return;
-
       const rect = e.currentTarget.getBoundingClientRect();
       const canvasX = e.clientX - rect.left;
       const canvasY = e.clientY - rect.top;
+
+      if (activeSubTab === 'content') {
+        if (!currentPageItems || !pageViewport) return;
+
+        // キャンバス座標 → PDFユーザー空間（CropBox原点・回転を含めてviewportで逆変換）
+        const [pageX, pageY] = pageViewport.convertToPdfPoint(canvasX, canvasY);
+        const hit = hitTestRecognizedItems(currentPageItems, { x: pageX, y: pageY });
+        setSelectedContentId(hit?.id ?? null);
+        return;
+      }
+
+      if (!activeTextBoxId || activeSubTab !== 'textbox') return;
+
       const pdfX = Math.round(canvasX / scale);
       const pdfY = Math.round(canvasY / scale);
 
@@ -421,7 +300,7 @@ export default function PdfEditor() {
         prev.map((box) => (box.id === activeTextBoxId ? { ...box, x: pdfX, y: pdfY } : box)),
       );
     },
-    [activeTextBoxId, activeSubTab, scale],
+    [activeTextBoxId, activeSubTab, scale, currentPageItems, pageViewport],
   );
 
   const handleFileDrop = (files: File[]) => {
@@ -433,17 +312,19 @@ export default function PdfEditor() {
     setHeaderFooter(DEFAULT_HEADER_FOOTER);
     setPageNumbering(DEFAULT_PAGE_NUMBERING);
     setActiveTextBoxId(null);
+    setContentEdits([]);
+    setRecognizedByPage(new Map());
+    setSelectedContentId(null);
+    setPngImages([]);
+    setOutputError(null);
+    setPngProgress(0);
   };
 
   const handleReset = () => {
     setPdfFile(null);
-    setPdf(null);
-    setPdfBytes(null);
-    setOriginalTotalPages(0);
     setCurrentPage(1);
     setPageInputValue('1');
     setPageOrder([]);
-    setThumbnails([]);
     setSelectedPages(new Set());
     setDraggedIndex(null);
     draggedIndexRef.current = null;
@@ -453,10 +334,27 @@ export default function PdfEditor() {
     setHeaderFooter(DEFAULT_HEADER_FOOTER);
     setPageNumbering(DEFAULT_PAGE_NUMBERING);
     setActiveTextBoxId(null);
+    setContentEdits([]);
+    setRecognizedByPage(new Map());
+    setSelectedContentId(null);
     setPngImages([]);
     setOutputError(null);
     setPngProgress(0);
   };
+
+  const upsertContentEdit = useCallback((edit: ContentEdit) => {
+    setContentEdits((prev) => {
+      const index = prev.findIndex((e) => e.target.id === edit.target.id);
+      if (index === -1) return [...prev, edit];
+      const next = [...prev];
+      next[index] = edit;
+      return next;
+    });
+  }, []);
+
+  const removeContentEdit = useCallback((targetId: string) => {
+    setContentEdits((prev) => prev.filter((edit) => edit.target.id !== targetId));
+  }, []);
 
   const updatePageOrder = useCallback(
     (nextOrder: number[]) => {
@@ -563,8 +461,13 @@ export default function PdfEditor() {
 
     let workingPdf: ArrayBuffer | Uint8Array = pdfBytes;
 
+    // コンテンツ編集は元PDFのページインデックス基準なので、並び替えより先に適用する
+    if (contentEdits.length > 0) {
+      workingPdf = await applyContentEdits(workingPdf, contentEdits);
+    }
+
     if (hasPageChanges) {
-      workingPdf = await reorderPdfPages(pdfBytes, pageOrder);
+      workingPdf = await reorderPdfPages(workingPdf, pageOrder);
     }
 
     if (hasOverlayEdits) {
@@ -585,6 +488,7 @@ export default function PdfEditor() {
     textBoxes,
     headerFooter,
     pageNumbering,
+    contentEdits,
   ]);
 
   const handleExtract = async () => {
@@ -746,6 +650,14 @@ export default function PdfEditor() {
           onHeaderFooterChange={setHeaderFooter}
           pageNumbering={pageNumbering}
           onPageNumberingChange={setPageNumbering}
+          isRecognizing={isRecognizing}
+          hasRecognized={currentPageItems !== null}
+          recognizedItems={currentPageItems ?? []}
+          selectedContentItem={selectedContentItem}
+          contentEdits={contentEdits}
+          onUpsertContentEdit={upsertContentEdit}
+          onRemoveContentEdit={removeContentEdit}
+          onSelectContentItem={setSelectedContentId}
           onSavePdf={handleSavePdf}
           onExportPng={handleExportPng}
           isSavingPdf={isSavingPdf}
@@ -770,6 +682,7 @@ export default function PdfEditor() {
           overlayCanvasRef={overlayCanvasRef}
           onCanvasClick={handleCanvasClick}
           isTextPlacementActive={Boolean(activeTextBoxId && activeSubTab === 'textbox')}
+          isContentSelectionActive={activeSubTab === 'content'}
           pageSize={pageSize}
         />
       </div>
