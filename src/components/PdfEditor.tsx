@@ -28,6 +28,7 @@ import type { ConvertedImage } from '../utils/pdfToImages';
 import type { TextBoxConfig, HeaderFooterSettings, PageNumberingConfig } from '../types/pdfEdit';
 import { DEFAULT_HEADER_FOOTER, DEFAULT_PAGE_NUMBERING } from '../types/pdfEdit';
 import type { ContentEdit, RecognizedItem } from '../types/contentEdit';
+import type { PageViewport } from 'pdfjs-dist';
 
 export default function PdfEditor() {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
@@ -38,6 +39,9 @@ export default function PdfEditor() {
   const [currentPage, setCurrentPage] = useState(1);
   const [scale, setScale] = useState(1);
   const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
+  // 表示中ページのviewport。ユーザー空間⇔キャンバス座標の変換に使う
+  // （CropBox原点や回転を考慮するため、scaleによる単純な換算では不十分）。
+  const [pageViewport, setPageViewport] = useState<PageViewport | null>(null);
   const [pageInputValue, setPageInputValue] = useState('1');
 
   const [activeSubTab, setActiveSubTab] = useState<EditorSubTab>('page-number');
@@ -112,6 +116,7 @@ export default function PdfEditor() {
     setContentEdits([]);
     setRecognizedByPage(new Map());
     setSelectedContentId(null);
+    setPageViewport(null);
   }, [pdf]);
 
   // コンテンツ編集タブで表示中のページを解析する（ページ単位でキャッシュ）
@@ -162,6 +167,7 @@ export default function PdfEditor() {
 
       const originalViewport = page.getViewport({ scale: 1 });
       setPageSize({ width: originalViewport.width, height: originalViewport.height });
+      setPageViewport(viewport);
 
       await page.render({
         canvasContext: context,
@@ -194,6 +200,7 @@ export default function PdfEditor() {
       scale,
       canvasWidth: overlayCanvas.width,
       canvasHeight: overlayCanvas.height,
+      viewport: pageViewport,
     };
 
     // コンテンツ編集（カバー+再描画）は元ページ内容の変更を模すため最初に描く
@@ -219,6 +226,7 @@ export default function PdfEditor() {
     displayPageCount,
     scale,
     pageSize,
+    pageViewport,
     pdfFile,
     activeTextBoxId,
     activeSubTab,
@@ -274,14 +282,11 @@ export default function PdfEditor() {
       const canvasY = e.clientY - rect.top;
 
       if (activeSubTab === 'content') {
-        if (!currentPageItems) return;
+        if (!currentPageItems || !pageViewport) return;
 
-        // キャンバス座標（左上原点）→ ページ空間（左下原点・pt）
-        const pagePoint = {
-          x: canvasX / scale,
-          y: pageSize.height - canvasY / scale,
-        };
-        const hit = hitTestRecognizedItems(currentPageItems, pagePoint);
+        // キャンバス座標 → PDFユーザー空間（CropBox原点・回転を含めてviewportで逆変換）
+        const [pageX, pageY] = pageViewport.convertToPdfPoint(canvasX, canvasY);
+        const hit = hitTestRecognizedItems(currentPageItems, { x: pageX, y: pageY });
         setSelectedContentId(hit?.id ?? null);
         return;
       }
@@ -295,7 +300,7 @@ export default function PdfEditor() {
         prev.map((box) => (box.id === activeTextBoxId ? { ...box, x: pdfX, y: pdfY } : box)),
       );
     },
-    [activeTextBoxId, activeSubTab, scale, currentPageItems, pageSize.height],
+    [activeTextBoxId, activeSubTab, scale, currentPageItems, pageViewport],
   );
 
   const handleFileDrop = (files: File[]) => {

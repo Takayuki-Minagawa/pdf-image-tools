@@ -277,7 +277,9 @@ async function recognizePathItems(page: PDFPageProxy): Promise<RecognizedPathIte
             }
           }
 
-          const shape = classifyShape(transformed, closed);
+          // PDFのfill演算子は開いたサブパスを暗黙に閉じるため、塗りありは閉図形として分類する。
+          // closed自体はストロークに閉じ辺が含まれるかを表すので幾何学的な値のまま保持する。
+          const shape = classifyShape(transformed, closed || filled);
           if (!shape) continue;
 
           const lineWidth = stroked
@@ -371,7 +373,8 @@ function hitTestItem(item: RecognizedItem, point: PagePoint, tolerance: number):
 
   if (item.kind === 'text') return true;
 
-  if (item.filled && item.closed && isPointInPolygon(point, item.points)) return true;
+  // fillは開いたサブパスも暗黙に閉じて塗るため、closedに関わらず内包判定する
+  if (item.filled && isPointInPolygon(point, item.points)) return true;
 
   const hitWidth = Math.max(item.lineWidth / 2, tolerance);
   const count = item.points.length;

@@ -54,13 +54,14 @@ function applyPathEdit(page: PDFPage, edit: PathContentEdit) {
   const pageHeight = page.getHeight();
   const svg = buildSvgPath(target.points, target.closed, pageHeight);
 
-  // 元の図形をカバー色で上書きして消す
+  // 元の図形をカバー色で上書きして消す。
+  // fillは開いたパスでも暗黙に閉じて塗られる（PDF仕様）ため closed は条件にしない。
   page.drawSvgPath(svg, {
     x: 0,
     y: pageHeight,
     borderColor: toRgb(edit.coverColor),
     borderWidth: Math.max(target.lineWidth, 0.5) + PATH_ERASE_EXTRA_WIDTH,
-    ...(target.filled && target.closed ? { color: toRgb(edit.coverColor) } : {}),
+    ...(target.filled ? { color: toRgb(edit.coverColor) } : {}),
   });
 
   if (edit.action === 'restyle') {
@@ -70,7 +71,7 @@ function applyPathEdit(page: PDFPage, edit: PathContentEdit) {
       ...(target.stroked
         ? { borderColor: toRgb(edit.strokeColor), borderWidth: Math.max(edit.lineWidth, 0.1) }
         : {}),
-      ...(target.filled && target.closed ? { color: toRgb(edit.fillColor) } : {}),
+      ...(target.filled ? { color: toRgb(edit.fillColor) } : {}),
     });
   }
 }

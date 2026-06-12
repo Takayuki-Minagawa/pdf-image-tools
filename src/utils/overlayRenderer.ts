@@ -1,9 +1,10 @@
+import type { PageViewport } from 'pdfjs-dist';
 import type {
   TextBoxConfig,
   HeaderFooterSettings,
   PageNumberingConfig,
 } from '../types/pdfEdit';
-import type { ContentEdit, PagePoint, RecognizedItem } from '../types/contentEdit';
+import type { ContentEdit, PageBBox, PagePoint, RecognizedItem } from '../types/contentEdit';
 import { resolvePlaceholders, formatPageNumber, wrapTextByWidth } from './pdfEditOperations';
 import { getItemBBox } from './contentRecognition';
 import {
@@ -15,12 +16,15 @@ import {
 /**
  * プレビュー用オーバーレイ描画の共有コンテキスト。
  * 座標はキャンバスピクセル基準（ページpt × scale）。
+ * viewport はPDFユーザー空間とキャンバス座標の相互変換に使う
+ * （CropBox原点オフセットや回転ページを考慮するため、単純なY反転では代替できない）。
  */
 export interface OverlayContext {
   ctx: CanvasRenderingContext2D;
   scale: number;
   canvasWidth: number;
   canvasHeight: number;
+  viewport: PageViewport | null;
 }
 
 export function drawTextBoxesOverlay(
@@ -131,23 +135,42 @@ export function drawHeaderFooterOverlay(
   }
 }
 
-/** ページ空間（左下原点・pt）の点をキャンバス座標へ変換する */
-function toCanvasPoint(overlay: OverlayContext, point: PagePoint) {
-  return {
-    x: point.x * overlay.scale,
-    y: overlay.canvasHeight - point.y * overlay.scale,
-  };
+/** PDFユーザー空間（pt）の点をキャンバス座標へ変換する */
+function toCanvasPoint(viewport: PageViewport, point: PagePoint): PagePoint {
+  const [x, y] = viewport.convertToViewportPoint(point.x, point.y);
+  return { x, y };
+}
+
+/** viewport変換の等方スケール（pt → キャンバスpx）。回転やUserUnitを含めた実効値。 */
+function viewportUnit(viewport: PageViewport): number {
+  const [a, b] = viewport.transform;
+  return Math.hypot(a, b);
+}
+
+/** ページ空間のbboxを、回転も考慮したキャンバス座標上の外接矩形へ変換する */
+function bboxToCanvasRect(viewport: PageViewport, bbox: PageBBox) {
+  const corners = [
+    toCanvasPoint(viewport, { x: bbox.x0, y: bbox.y0 }),
+    toCanvasPoint(viewport, { x: bbox.x1, y: bbox.y0 }),
+    toCanvasPoint(viewport, { x: bbox.x1, y: bbox.y1 }),
+    toCanvasPoint(viewport, { x: bbox.x0, y: bbox.y1 }),
+  ];
+  const xs = corners.map((c) => c.x);
+  const ys = corners.map((c) => c.y);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
 }
 
 function tracePath(
-  overlay: OverlayContext,
+  ctx: CanvasRenderingContext2D,
+  viewport: PageViewport,
   points: PagePoint[],
   closed: boolean,
 ) {
-  const { ctx } = overlay;
   ctx.beginPath();
   points.forEach((point, index) => {
-    const { x, y } = toCanvasPoint(overlay, point);
+    const { x, y } = toCanvasPoint(viewport, point);
     if (index === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   });
@@ -163,16 +186,12 @@ export function drawRecognizedItemsOverlay(
   items: RecognizedItem[],
   selectedId: string | null,
 ) {
-  const { ctx, scale } = overlay;
+  const { ctx, viewport } = overlay;
+  if (!viewport) return;
 
   for (const item of items) {
-    const bbox = getItemBBox(item);
     const isSelected = item.id === selectedId;
-
-    const x = bbox.x0 * scale;
-    const y = overlay.canvasHeight - bbox.y1 * scale;
-    const width = (bbox.x1 - bbox.x0) * scale;
-    const height = (bbox.y1 - bbox.y0) * scale;
+    const { x, y, width, height } = bboxToCanvasRect(viewport, getItemBBox(item));
 
     ctx.strokeStyle = isSelected ? '#f59e0b' : 'rgba(59, 130, 246, 0.45)';
     ctx.lineWidth = isSelected ? 2 : 1;
@@ -192,60 +211,78 @@ export function drawRecognizedItemsOverlay(
  * 保存時の applyContentEdits と同じ見た目になるように描く。
  */
 export function drawContentEditsOverlay(overlay: OverlayContext, edits: ContentEdit[]) {
-  const { ctx, scale } = overlay;
+  const { ctx, viewport } = overlay;
+  if (!viewport) return;
+  const unit = viewportUnit(viewport);
 
   for (const edit of edits) {
     if (edit.kind === 'text') {
       const target = edit.target;
-      const pad = 1 * scale;
-      const x = target.x * scale - pad;
-      const top =
-        overlay.canvasHeight -
-        (target.y + target.fontSize * TEXT_COVER_ASCENT_RATIO) * scale -
-        pad;
-      const width = target.width * scale + pad * 2;
-      const height =
-        target.fontSize * (TEXT_COVER_DESCENT_RATIO + TEXT_COVER_ASCENT_RATIO) * scale +
-        pad * 2;
+      const pad = 1;
+      const x0 = target.x - pad;
+      const y0 = target.y - target.fontSize * TEXT_COVER_DESCENT_RATIO - pad;
+      const x1 = target.x + target.width + pad;
+      const y1 = target.y + target.fontSize * TEXT_COVER_ASCENT_RATIO + pad;
 
+      // カバー矩形はユーザー空間の頂点を変換して塗る（回転ページでも表示位置が一致する）
+      tracePath(
+        ctx,
+        viewport,
+        [
+          { x: x0, y: y0 },
+          { x: x1, y: y0 },
+          { x: x1, y: y1 },
+          { x: x0, y: y1 },
+        ],
+        true,
+      );
       ctx.fillStyle = edit.coverColor;
-      ctx.fillRect(x, top, width, height);
+      ctx.fill();
 
       if (edit.action === 'replace' && edit.newText) {
+        // ベースライン位置とユーザー空間X軸の向きに合わせて描く
+        const base = toCanvasPoint(viewport, { x: target.x, y: target.y });
+        const origin = toCanvasPoint(viewport, { x: 0, y: 0 });
+        const xAxis = toCanvasPoint(viewport, { x: 1, y: 0 });
+        const angle = Math.atan2(xAxis.y - origin.y, xAxis.x - origin.x);
+
+        ctx.save();
+        ctx.translate(base.x, base.y);
+        ctx.rotate(angle);
         ctx.fillStyle = edit.fontColor;
-        ctx.font = `${edit.fontSize * scale}px sans-serif`;
+        ctx.font = `${edit.fontSize * unit}px sans-serif`;
         ctx.textBaseline = 'alphabetic';
         ctx.textAlign = 'left';
-        const lineHeight = edit.fontSize * 1.2 * scale;
-        const base = toCanvasPoint(overlay, { x: target.x, y: target.y });
+        const lineHeight = edit.fontSize * 1.2 * unit;
         edit.newText.split('\n').forEach((line, index) => {
-          ctx.fillText(line, base.x, base.y + index * lineHeight);
+          ctx.fillText(line, 0, index * lineHeight);
         });
-        ctx.textBaseline = 'top';
+        ctx.restore();
       }
     } else {
       const target = edit.target;
 
       // 消去パス: 元の図形をカバー色でなぞる
-      tracePath(overlay, target.points, target.closed);
+      tracePath(ctx, viewport, target.points, target.closed);
       ctx.strokeStyle = edit.coverColor;
-      ctx.lineWidth = (Math.max(target.lineWidth, 0.5) + PATH_ERASE_EXTRA_WIDTH) * scale;
+      ctx.lineWidth = (Math.max(target.lineWidth, 0.5) + PATH_ERASE_EXTRA_WIDTH) * unit;
       ctx.lineJoin = 'round';
       ctx.stroke();
-      if (target.filled && target.closed) {
+      // fillは開いたパスも暗黙に閉じて塗る（canvasのfill()もPDFと同じ挙動）
+      if (target.filled) {
         ctx.fillStyle = edit.coverColor;
         ctx.fill();
       }
 
       if (edit.action === 'restyle') {
-        tracePath(overlay, target.points, target.closed);
-        if (target.filled && target.closed) {
+        tracePath(ctx, viewport, target.points, target.closed);
+        if (target.filled) {
           ctx.fillStyle = edit.fillColor;
           ctx.fill();
         }
         if (target.stroked) {
           ctx.strokeStyle = edit.strokeColor;
-          ctx.lineWidth = Math.max(edit.lineWidth, 0.1) * scale;
+          ctx.lineWidth = Math.max(edit.lineWidth, 0.1) * unit;
           ctx.stroke();
         }
       }
