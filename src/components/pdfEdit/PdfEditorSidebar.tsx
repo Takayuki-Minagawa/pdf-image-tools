@@ -1,10 +1,12 @@
-import { BookOpen, Hash, Image as ImageIcon, Save, Type } from 'lucide-react';
+import { BookOpen, Hash, Image as ImageIcon, Save, Shapes, Type } from 'lucide-react';
 import { TextBoxEditor } from './TextBoxEditor';
 import { HeaderFooterEditor } from './HeaderFooterEditor';
 import { PageNumberEditor } from './PageNumberEditor';
+import { ContentEditPanel } from './ContentEditPanel';
 import type { TextBoxConfig, HeaderFooterSettings, PageNumberingConfig } from '../../types/pdfEdit';
+import type { ContentEdit, RecognizedItem } from '../../types/contentEdit';
 
-export type EditorSubTab = 'textbox' | 'header-footer' | 'page-number';
+export type EditorSubTab = 'content' | 'textbox' | 'header-footer' | 'page-number';
 
 interface PdfEditorSidebarProps {
   activeSubTab: EditorSubTab;
@@ -18,6 +20,14 @@ interface PdfEditorSidebarProps {
   onHeaderFooterChange: (settings: HeaderFooterSettings) => void;
   pageNumbering: PageNumberingConfig;
   onPageNumberingChange: (config: PageNumberingConfig) => void;
+  isRecognizing: boolean;
+  hasRecognized: boolean;
+  recognizedItems: RecognizedItem[];
+  selectedContentItem: RecognizedItem | null;
+  contentEdits: ContentEdit[];
+  onUpsertContentEdit: (edit: ContentEdit) => void;
+  onRemoveContentEdit: (targetId: string) => void;
+  onSelectContentItem: (id: string | null) => void;
   onSavePdf: () => void;
   onExportPng: () => void;
   isSavingPdf: boolean;
@@ -25,6 +35,7 @@ interface PdfEditorSidebarProps {
 }
 
 const SUB_TABS: { key: EditorSubTab; label: string; icon: typeof Type }[] = [
+  { key: 'content', label: 'コンテンツ編集', icon: Shapes },
   { key: 'textbox', label: 'テキストボックス', icon: Type },
   { key: 'header-footer', label: 'ヘッダー/フッター', icon: BookOpen },
   { key: 'page-number', label: 'ページ番号', icon: Hash },
@@ -42,6 +53,14 @@ export function PdfEditorSidebar({
   onHeaderFooterChange,
   pageNumbering,
   onPageNumberingChange,
+  isRecognizing,
+  hasRecognized,
+  recognizedItems,
+  selectedContentItem,
+  contentEdits,
+  onUpsertContentEdit,
+  onRemoveContentEdit,
+  onSelectContentItem,
   onSavePdf,
   onExportPng,
   isSavingPdf,
@@ -70,6 +89,18 @@ export function PdfEditorSidebar({
       </div>
 
       <div className="max-h-[500px] overflow-auto rounded-lg border border-gray-200 p-3">
+        {activeSubTab === 'content' && (
+          <ContentEditPanel
+            isRecognizing={isRecognizing}
+            hasRecognized={hasRecognized}
+            items={recognizedItems}
+            selectedItem={selectedContentItem}
+            edits={contentEdits}
+            onUpsertEdit={onUpsertContentEdit}
+            onRemoveEdit={onRemoveContentEdit}
+            onSelectItem={onSelectContentItem}
+          />
+        )}
         {activeSubTab === 'textbox' && (
           <TextBoxEditor
             textBoxes={textBoxes}

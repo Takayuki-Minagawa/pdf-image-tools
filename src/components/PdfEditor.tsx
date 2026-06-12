@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   RotateCcw,
   FileUp,
@@ -18,11 +18,16 @@ import {
   drawTextBoxesOverlay,
   drawHeaderFooterOverlay,
   drawPageNumberOverlay,
+  drawRecognizedItemsOverlay,
+  drawContentEditsOverlay,
   type OverlayContext,
 } from '../utils/overlayRenderer';
+import { recognizePageContent, hitTestRecognizedItems } from '../utils/contentRecognition';
+import { applyContentEdits } from '../utils/contentEditOperations';
 import type { ConvertedImage } from '../utils/pdfToImages';
 import type { TextBoxConfig, HeaderFooterSettings, PageNumberingConfig } from '../types/pdfEdit';
 import { DEFAULT_HEADER_FOOTER, DEFAULT_PAGE_NUMBERING } from '../types/pdfEdit';
+import type { ContentEdit, RecognizedItem } from '../types/contentEdit';
 
 export default function PdfEditor() {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
@@ -40,6 +45,13 @@ export default function PdfEditor() {
   const [headerFooter, setHeaderFooter] = useState<HeaderFooterSettings>(DEFAULT_HEADER_FOOTER);
   const [pageNumbering, setPageNumbering] = useState<PageNumberingConfig>(DEFAULT_PAGE_NUMBERING);
   const [activeTextBoxId, setActiveTextBoxId] = useState<string | null>(null);
+
+  const [contentEdits, setContentEdits] = useState<ContentEdit[]>([]);
+  const [recognizedByPage, setRecognizedByPage] = useState<Map<number, RecognizedItem[]>>(
+    new Map(),
+  );
+  const [isRecognizing, setIsRecognizing] = useState(false);
+  const [selectedContentId, setSelectedContentId] = useState<string | null>(null);
 
   const [pageOrder, setPageOrder] = useState<number[]>([]);
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
@@ -60,6 +72,18 @@ export default function PdfEditor() {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const displayPageCount = pageOrder.length;
+  const currentOriginalPageIndex = pageOrder[currentPage - 1] ?? -1;
+  const currentPageItems =
+    currentOriginalPageIndex >= 0
+      ? (recognizedByPage.get(currentOriginalPageIndex) ?? null)
+      : null;
+  const selectedContentItem = selectedContentId
+    ? (currentPageItems?.find((item) => item.id === selectedContentId) ?? null)
+    : null;
+  const currentPageContentEdits = useMemo(
+    () => contentEdits.filter((edit) => edit.target.pageIndex === currentOriginalPageIndex),
+    [contentEdits, currentOriginalPageIndex],
+  );
   const hasPageChanges =
     pageOrder.length > 0 &&
     (pageOrder.length !== originalTotalPages || !isIdentityPageOrder(pageOrder));
@@ -85,7 +109,42 @@ export default function PdfEditor() {
     setPageInputValue('1');
     setExtractStart('');
     setExtractEnd('');
+    setContentEdits([]);
+    setRecognizedByPage(new Map());
+    setSelectedContentId(null);
   }, [pdf]);
+
+  // コンテンツ編集タブで表示中のページを解析する（ページ単位でキャッシュ）
+  useEffect(() => {
+    if (activeSubTab !== 'content' || !pdf || currentOriginalPageIndex < 0) return;
+    if (recognizedByPage.has(currentOriginalPageIndex)) return;
+
+    let cancelled = false;
+
+    const recognize = async () => {
+      setIsRecognizing(true);
+      try {
+        const page = await pdf.getPage(currentOriginalPageIndex + 1);
+        const items = await recognizePageContent(page);
+        if (!cancelled) {
+          setRecognizedByPage((prev) => new Map(prev).set(currentOriginalPageIndex, items));
+        }
+      } catch (err) {
+        console.error(err);
+        if (!cancelled) {
+          setRecognizedByPage((prev) => new Map(prev).set(currentOriginalPageIndex, []));
+        }
+      } finally {
+        if (!cancelled) setIsRecognizing(false);
+      }
+    };
+
+    recognize();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSubTab, pdf, currentOriginalPageIndex, recognizedByPage]);
 
   useEffect(() => {
     const renderPage = async () => {
@@ -137,6 +196,12 @@ export default function PdfEditor() {
       canvasHeight: overlayCanvas.height,
     };
 
+    // コンテンツ編集（カバー+再描画）は元ページ内容の変更を模すため最初に描く
+    drawContentEditsOverlay(overlay, currentPageContentEdits);
+    if (activeSubTab === 'content' && currentPageItems) {
+      drawRecognizedItemsOverlay(overlay, currentPageItems, selectedContentId);
+    }
+
     drawTextBoxesOverlay(overlay, textBoxes, currentPage - 1, activeTextBoxId);
     drawHeaderFooterOverlay(
       overlay,
@@ -156,6 +221,10 @@ export default function PdfEditor() {
     pageSize,
     pdfFile,
     activeTextBoxId,
+    activeSubTab,
+    currentPageItems,
+    currentPageContentEdits,
+    selectedContentId,
   ]);
 
   useEffect(() => {
@@ -200,11 +269,25 @@ export default function PdfEditor() {
 
   const handleCanvasClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      if (!activeTextBoxId || activeSubTab !== 'textbox') return;
-
       const rect = e.currentTarget.getBoundingClientRect();
       const canvasX = e.clientX - rect.left;
       const canvasY = e.clientY - rect.top;
+
+      if (activeSubTab === 'content') {
+        if (!currentPageItems) return;
+
+        // キャンバス座標（左上原点）→ ページ空間（左下原点・pt）
+        const pagePoint = {
+          x: canvasX / scale,
+          y: pageSize.height - canvasY / scale,
+        };
+        const hit = hitTestRecognizedItems(currentPageItems, pagePoint);
+        setSelectedContentId(hit?.id ?? null);
+        return;
+      }
+
+      if (!activeTextBoxId || activeSubTab !== 'textbox') return;
+
       const pdfX = Math.round(canvasX / scale);
       const pdfY = Math.round(canvasY / scale);
 
@@ -212,7 +295,7 @@ export default function PdfEditor() {
         prev.map((box) => (box.id === activeTextBoxId ? { ...box, x: pdfX, y: pdfY } : box)),
       );
     },
-    [activeTextBoxId, activeSubTab, scale],
+    [activeTextBoxId, activeSubTab, scale, currentPageItems, pageSize.height],
   );
 
   const handleFileDrop = (files: File[]) => {
@@ -224,6 +307,9 @@ export default function PdfEditor() {
     setHeaderFooter(DEFAULT_HEADER_FOOTER);
     setPageNumbering(DEFAULT_PAGE_NUMBERING);
     setActiveTextBoxId(null);
+    setContentEdits([]);
+    setRecognizedByPage(new Map());
+    setSelectedContentId(null);
     setPngImages([]);
     setOutputError(null);
     setPngProgress(0);
@@ -243,10 +329,27 @@ export default function PdfEditor() {
     setHeaderFooter(DEFAULT_HEADER_FOOTER);
     setPageNumbering(DEFAULT_PAGE_NUMBERING);
     setActiveTextBoxId(null);
+    setContentEdits([]);
+    setRecognizedByPage(new Map());
+    setSelectedContentId(null);
     setPngImages([]);
     setOutputError(null);
     setPngProgress(0);
   };
+
+  const upsertContentEdit = useCallback((edit: ContentEdit) => {
+    setContentEdits((prev) => {
+      const index = prev.findIndex((e) => e.target.id === edit.target.id);
+      if (index === -1) return [...prev, edit];
+      const next = [...prev];
+      next[index] = edit;
+      return next;
+    });
+  }, []);
+
+  const removeContentEdit = useCallback((targetId: string) => {
+    setContentEdits((prev) => prev.filter((edit) => edit.target.id !== targetId));
+  }, []);
 
   const updatePageOrder = useCallback(
     (nextOrder: number[]) => {
@@ -353,8 +456,13 @@ export default function PdfEditor() {
 
     let workingPdf: ArrayBuffer | Uint8Array = pdfBytes;
 
+    // コンテンツ編集は元PDFのページインデックス基準なので、並び替えより先に適用する
+    if (contentEdits.length > 0) {
+      workingPdf = await applyContentEdits(workingPdf, contentEdits);
+    }
+
     if (hasPageChanges) {
-      workingPdf = await reorderPdfPages(pdfBytes, pageOrder);
+      workingPdf = await reorderPdfPages(workingPdf, pageOrder);
     }
 
     if (hasOverlayEdits) {
@@ -375,6 +483,7 @@ export default function PdfEditor() {
     textBoxes,
     headerFooter,
     pageNumbering,
+    contentEdits,
   ]);
 
   const handleExtract = async () => {
@@ -536,6 +645,14 @@ export default function PdfEditor() {
           onHeaderFooterChange={setHeaderFooter}
           pageNumbering={pageNumbering}
           onPageNumberingChange={setPageNumbering}
+          isRecognizing={isRecognizing}
+          hasRecognized={currentPageItems !== null}
+          recognizedItems={currentPageItems ?? []}
+          selectedContentItem={selectedContentItem}
+          contentEdits={contentEdits}
+          onUpsertContentEdit={upsertContentEdit}
+          onRemoveContentEdit={removeContentEdit}
+          onSelectContentItem={setSelectedContentId}
           onSavePdf={handleSavePdf}
           onExportPng={handleExportPng}
           isSavingPdf={isSavingPdf}
@@ -560,6 +677,7 @@ export default function PdfEditor() {
           overlayCanvasRef={overlayCanvasRef}
           onCanvasClick={handleCanvasClick}
           isTextPlacementActive={Boolean(activeTextBoxId && activeSubTab === 'textbox')}
+          isContentSelectionActive={activeSubTab === 'content'}
           pageSize={pageSize}
         />
       </div>

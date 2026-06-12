@@ -3,7 +3,14 @@ import type {
   HeaderFooterSettings,
   PageNumberingConfig,
 } from '../types/pdfEdit';
+import type { ContentEdit, PagePoint, RecognizedItem } from '../types/contentEdit';
 import { resolvePlaceholders, formatPageNumber, wrapTextByWidth } from './pdfEditOperations';
+import { getItemBBox } from './contentRecognition';
+import {
+  PATH_ERASE_EXTRA_WIDTH,
+  TEXT_COVER_ASCENT_RATIO,
+  TEXT_COVER_DESCENT_RATIO,
+} from './contentEditOperations';
 
 /**
  * プレビュー用オーバーレイ描画の共有コンテキスト。
@@ -121,6 +128,128 @@ export function drawHeaderFooterOverlay(
 
   if (settings.footer.enabled) {
     drawSection(settings.footer, 'bottom', canvasHeight - settings.footer.margin * scale);
+  }
+}
+
+/** ページ空間（左下原点・pt）の点をキャンバス座標へ変換する */
+function toCanvasPoint(overlay: OverlayContext, point: PagePoint) {
+  return {
+    x: point.x * overlay.scale,
+    y: overlay.canvasHeight - point.y * overlay.scale,
+  };
+}
+
+function tracePath(
+  overlay: OverlayContext,
+  points: PagePoint[],
+  closed: boolean,
+) {
+  const { ctx } = overlay;
+  ctx.beginPath();
+  points.forEach((point, index) => {
+    const { x, y } = toCanvasPoint(overlay, point);
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  if (closed) ctx.closePath();
+}
+
+/**
+ * 認識済み要素の輪郭を表示する（コンテンツ編集タブ用）。
+ * 選択中の要素は強調表示する。
+ */
+export function drawRecognizedItemsOverlay(
+  overlay: OverlayContext,
+  items: RecognizedItem[],
+  selectedId: string | null,
+) {
+  const { ctx, scale } = overlay;
+
+  for (const item of items) {
+    const bbox = getItemBBox(item);
+    const isSelected = item.id === selectedId;
+
+    const x = bbox.x0 * scale;
+    const y = overlay.canvasHeight - bbox.y1 * scale;
+    const width = (bbox.x1 - bbox.x0) * scale;
+    const height = (bbox.y1 - bbox.y0) * scale;
+
+    ctx.strokeStyle = isSelected ? '#f59e0b' : 'rgba(59, 130, 246, 0.45)';
+    ctx.lineWidth = isSelected ? 2 : 1;
+    ctx.setLineDash(isSelected ? [] : [3, 3]);
+    ctx.strokeRect(x - 1, y - 1, width + 2, height + 2);
+    ctx.setLineDash([]);
+
+    if (isSelected) {
+      ctx.fillStyle = 'rgba(245, 158, 11, 0.12)';
+      ctx.fillRect(x - 1, y - 1, width + 2, height + 2);
+    }
+  }
+}
+
+/**
+ * コンテンツ編集（カバー + 再描画）の結果をプレビューする。
+ * 保存時の applyContentEdits と同じ見た目になるように描く。
+ */
+export function drawContentEditsOverlay(overlay: OverlayContext, edits: ContentEdit[]) {
+  const { ctx, scale } = overlay;
+
+  for (const edit of edits) {
+    if (edit.kind === 'text') {
+      const target = edit.target;
+      const pad = 1 * scale;
+      const x = target.x * scale - pad;
+      const top =
+        overlay.canvasHeight -
+        (target.y + target.fontSize * TEXT_COVER_ASCENT_RATIO) * scale -
+        pad;
+      const width = target.width * scale + pad * 2;
+      const height =
+        target.fontSize * (TEXT_COVER_DESCENT_RATIO + TEXT_COVER_ASCENT_RATIO) * scale +
+        pad * 2;
+
+      ctx.fillStyle = edit.coverColor;
+      ctx.fillRect(x, top, width, height);
+
+      if (edit.action === 'replace' && edit.newText) {
+        ctx.fillStyle = edit.fontColor;
+        ctx.font = `${edit.fontSize * scale}px sans-serif`;
+        ctx.textBaseline = 'alphabetic';
+        ctx.textAlign = 'left';
+        const lineHeight = edit.fontSize * 1.2 * scale;
+        const base = toCanvasPoint(overlay, { x: target.x, y: target.y });
+        edit.newText.split('\n').forEach((line, index) => {
+          ctx.fillText(line, base.x, base.y + index * lineHeight);
+        });
+        ctx.textBaseline = 'top';
+      }
+    } else {
+      const target = edit.target;
+
+      // 消去パス: 元の図形をカバー色でなぞる
+      tracePath(overlay, target.points, target.closed);
+      ctx.strokeStyle = edit.coverColor;
+      ctx.lineWidth = (Math.max(target.lineWidth, 0.5) + PATH_ERASE_EXTRA_WIDTH) * scale;
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+      if (target.filled && target.closed) {
+        ctx.fillStyle = edit.coverColor;
+        ctx.fill();
+      }
+
+      if (edit.action === 'restyle') {
+        tracePath(overlay, target.points, target.closed);
+        if (target.filled && target.closed) {
+          ctx.fillStyle = edit.fillColor;
+          ctx.fill();
+        }
+        if (target.stroked) {
+          ctx.strokeStyle = edit.strokeColor;
+          ctx.lineWidth = Math.max(edit.lineWidth, 0.1) * scale;
+          ctx.stroke();
+        }
+      }
+    }
   }
 }
 

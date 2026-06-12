@@ -9,7 +9,7 @@ import type {
 } from '../types/pdfEdit';
 import { loadFontBytes } from './fontLoader';
 
-function toRgb(hex: string) {
+export function toRgb(hex: string) {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
   if (!result) return rgb(0, 0, 0);
   return rgb(

@@ -23,6 +23,13 @@
 - 合計ページ数の表示
 
 ### PDF編集
+- **コンテンツ編集（既存要素の編集）**
+  - PDF内の既存テキスト・ライン・ポリライン・ポリゴン・矩形を自動認識
+  - プレビュー上でクリックして要素を選択
+  - テキスト：内容の置き換え、フォントサイズ・文字色の変更、削除
+  - 図形：線色・線幅・塗り色の変更、削除
+  - 元の要素をカバー色で塗り潰して上書きする方式（背景が単色でない箇所では塗り潰し跡が残る場合あり）
+  - 曲線を含むパスと回転ページは対象外
 - **ページ編集**
   - ページの削除
   - ページの並び替え（ドラッグ＆ドロップ）
@@ -89,6 +96,7 @@ src/
 │   ├── PdfMerger.tsx           # PDF結合
 │   ├── ProgressBar.tsx         # 進捗バー
 │   └── pdfEdit/
+│       ├── ContentEditPanel.tsx    # 既存コンテンツ編集パネル
 │       ├── TextBoxEditor.tsx       # テキストボックス設定パネル
 │       ├── HeaderFooterEditor.tsx  # ヘッダー/フッター設定パネル
 │       ├── PageNumberEditor.tsx    # ページ番号設定パネル
@@ -96,12 +104,18 @@ src/
 │       ├── PdfEditorSidebar.tsx    # PDF編集サイドバー
 │       └── PdfEditorPreview.tsx    # PDF編集プレビュー
 ├── hooks/
-│   └── useDropzone.ts          # ドラッグ＆ドロップフック
+│   ├── useDropzone.ts          # ドラッグ＆ドロップフック
+│   └── usePdfDocument.ts       # PDF読み込み・サムネイル生成フック
 ├── types/
+│   ├── contentEdit.ts          # 既存コンテンツ認識・編集の型定義
 │   └── pdfEdit.ts              # PDF編集の型定義
 ├── utils/
+│   ├── contentEditOperations.ts # 既存コンテンツ編集の適用（カバー+再描画）
+│   ├── contentRecognition.ts   # テキスト・パス認識（pdf.jsオペレータ解析）
 │   ├── fontLoader.ts           # 日本語フォント遅延読み込み
 │   ├── imagesToPdf.ts          # 画像→PDF変換ユーティリティ
+│   ├── overlayRenderer.ts      # プレビューオーバーレイ描画
+│   ├── pageOrderUtils.ts       # ページ並び替えユーティリティ
 │   ├── pdfEditOperations.ts    # PDF編集操作（テキスト描画・ヘッダー/フッター・ページ番号）
 │   ├── pdfEditor.ts            # PDFページ編集ユーティリティ
 │   └── pdfToImages.ts          # PDF→画像変換ユーティリティ
