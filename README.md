@@ -80,6 +80,9 @@ npm run dev
 # ビルド
 npm run build
 
+# テスト（コンテンツ認識・編集のラウンドトリップ検証）
+npm test
+
 # プレビュー
 npm run preview
 ```
