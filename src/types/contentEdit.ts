@@ -51,7 +51,9 @@ export type RecognizedItem = RecognizedTextItem | RecognizedPathItem;
 export interface TextContentEdit {
   kind: 'text';
   target: RecognizedTextItem;
-  action: 'replace' | 'delete';
+  // delete: 元の文字をカバー色で隠す（見た目のみ。文字データは残る）
+  // redact: 文字描画をコンテンツストリームから物理削除（AIのテキスト抽出からも消える）＋カバー
+  action: 'replace' | 'delete' | 'redact';
   newText: string;
   fontSize: number;
   fontColor: string;

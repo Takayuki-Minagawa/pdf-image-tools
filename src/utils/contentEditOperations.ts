@@ -8,6 +8,8 @@ import type {
 } from '../types/contentEdit';
 import { toRgb } from './pdfEditOperations';
 import { loadFontBytes } from './fontLoader';
+import { redactTextFromPage } from './contentStreamRedaction';
+import type { RecognizedTextItem } from '../types/contentEdit';
 
 // テキストのカバー矩形: ベースラインからディセンダー分を下に、文字高+αを上に確保
 export const TEXT_COVER_DESCENT_RATIO = 0.25;
@@ -77,13 +79,46 @@ function applyPathEdit(page: PDFPage, edit: PathContentEdit) {
 }
 
 /**
- * 認識済みコンテンツへの編集（置換 / スタイル変更 / 削除）を適用する。
- * 元要素はカバー色で塗り潰し、新しい内容を上から描画する方式。
+ * redact アクションのテキスト編集について、対象文字をコンテンツストリームから
+ * 物理削除する。ページ単位でまとめて処理し、除去を保証できなかった対象を返す。
+ */
+function applyRedactions(
+  pdfDoc: PDFDocument,
+  edits: ContentEdit[],
+  pageCount: number,
+): RecognizedTextItem[] {
+  const byPage = new Map<number, RecognizedTextItem[]>();
+  for (const edit of edits) {
+    if (edit.kind !== 'text' || edit.action !== 'redact') continue;
+    const { pageIndex } = edit.target;
+    if (pageIndex < 0 || pageIndex >= pageCount) continue;
+    const list = byPage.get(pageIndex) ?? [];
+    list.push(edit.target);
+    byPage.set(pageIndex, list);
+  }
+
+  const unmatched: RecognizedTextItem[] = [];
+  for (const [pageIndex, targets] of byPage) {
+    const result = redactTextFromPage(pdfDoc, pageIndex, targets);
+    unmatched.push(...result.unmatched);
+  }
+  return unmatched;
+}
+
+/**
+ * 認識済みコンテンツへの編集（置換 / スタイル変更 / 削除 / 完全削除）を適用する。
+ *
+ * - delete / replace / restyle: 元要素をカバー色で塗り潰し、新しい内容を上から描画する。
+ * - redact: 対象テキストの描画オペランドをコンテンツストリームから物理削除した上で
+ *   カバー色で塗り潰す。テキスト抽出（AI読み込み等）からも復元できなくなる。
+ *
  * ページインデックスは元PDF基準のため、ページ並び替え前に適用すること。
+ * 除去を保証できなかった redact 対象があれば onWarn に渡す（視覚的なカバーは行われる）。
  */
 export async function applyContentEdits(
   pdfBytes: ArrayBuffer | Uint8Array,
   edits: ContentEdit[],
+  onWarn?: (unmatched: RecognizedTextItem[]) => void,
 ): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.load(pdfBytes);
 
@@ -97,6 +132,17 @@ export async function applyContentEdits(
   }
 
   const pageCount = pdfDoc.getPageCount();
+
+  // 物理削除はカバー描画より先に、元のストリームに対して行う
+  const unmatched = applyRedactions(pdfDoc, edits, pageCount);
+  if (unmatched.length > 0) {
+    console.warn(
+      `[redact] ${unmatched.length}件のテキストはストリームから除去できませんでした（カバーのみ適用）`,
+      unmatched.map((t) => t.text),
+    );
+    onWarn?.(unmatched);
+  }
+
   for (const edit of edits) {
     const { pageIndex } = edit.target;
     if (pageIndex < 0 || pageIndex >= pageCount) continue;

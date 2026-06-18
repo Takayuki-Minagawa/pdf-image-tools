@@ -1,4 +1,4 @@
-import { Loader2, MousePointer2, Trash2, Undo2 } from 'lucide-react';
+import { EyeOff, Loader2, MousePointer2, Trash2, Undo2 } from 'lucide-react';
 import type {
   ContentEdit,
   PathContentEdit,
@@ -31,6 +31,7 @@ const SHAPE_LABELS: Record<RecognizedShape, string> = {
 function summarizeEdit(edit: ContentEdit): string {
   if (edit.kind === 'text') {
     const label = edit.target.text.length > 12 ? `${edit.target.text.slice(0, 12)}…` : edit.target.text;
+    if (edit.action === 'redact') return `「${label}」を完全削除`;
     return edit.action === 'delete' ? `「${label}」を削除` : `「${label}」を置換`;
   }
   const label = SHAPE_LABELS[edit.target.shape];
@@ -210,6 +211,12 @@ export function ContentEditPanel({
     onUpsertEdit({ ...(selectedEdit ?? base), action: 'delete' } as ContentEdit);
   };
 
+  const handleRedact = () => {
+    if (!selectedItem || selectedItem.kind !== 'text') return;
+    const base = selectedEdit?.kind === 'text' ? selectedEdit : createTextEdit(selectedItem);
+    onUpsertEdit({ ...base, action: 'redact' });
+  };
+
   return (
     <div className="space-y-3">
       <h3 className="text-sm font-semibold text-gray-700">コンテンツ編集</h3>
@@ -236,8 +243,20 @@ export function ContentEditPanel({
 
       {selectedItem && (
         <div className="border border-amber-300 bg-amber-50/40 rounded-lg p-3 space-y-3">
-          {selectedEdit?.action === 'delete' ? (
-            <p className="text-sm text-red-600 font-medium">この要素は削除されます。</p>
+          {selectedEdit?.action === 'redact' ? (
+            <div className="space-y-1">
+              <p className="text-sm text-red-700 font-medium">この要素は完全削除されます。</p>
+              <p className="text-xs text-gray-500">
+                文字データをPDFから物理的に除去します。AIのテキスト抽出やコピーでも復元できません。
+              </p>
+            </div>
+          ) : selectedEdit?.action === 'delete' ? (
+            <div className="space-y-1">
+              <p className="text-sm text-red-600 font-medium">この要素はカバーで隠されます。</p>
+              <p className="text-xs text-gray-500">
+                上から塗り潰すだけで文字データは残るため、テキスト抽出では読めてしまいます。
+              </p>
+            </div>
           ) : selectedItem.kind === 'text' ? (
             <TextEditForm
               target={selectedItem}
@@ -252,14 +271,25 @@ export function ContentEditPanel({
             />
           )}
 
-          <div className="flex gap-2">
-            {selectedEdit?.action !== 'delete' && (
+          <div className="flex flex-wrap gap-2">
+            {selectedItem.kind === 'text' && selectedEdit?.action !== 'redact' && (
+              <button
+                onClick={handleRedact}
+                className="flex flex-1 items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors"
+                title="文字データごとPDFから削除し、AIのテキスト抽出からも消します"
+              >
+                <EyeOff className="w-3.5 h-3.5" />
+                完全削除（AIからも読めなくする）
+              </button>
+            )}
+            {selectedEdit?.action !== 'delete' && selectedEdit?.action !== 'redact' && (
               <button
                 onClick={handleDelete}
                 className="flex flex-1 items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 transition-colors"
+                title={selectedItem.kind === 'text' ? 'カバーで隠すだけ（文字データは残ります）' : undefined}
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                この要素を削除
+                {selectedItem.kind === 'text' ? 'カバーで隠す' : 'この要素を削除'}
               </button>
             )}
             {selectedEdit && (
@@ -308,7 +338,8 @@ export function ContentEditPanel({
       )}
 
       <p className="text-xs text-gray-400">
-        編集は「元の要素をカバー色で塗り潰し、新しい内容を上書きする」方式で保存されます。
+        「カバーで隠す」「置換」は元要素をカバー色で塗り潰す方式です（文字データは残るためテキスト抽出で読めます）。
+        物件名などをAIや検索からも確実に消すには「完全削除」を使ってください（文字データをPDFから除去します）。
         背景が単色でない箇所では塗り潰し跡が見える場合があります。
       </p>
     </div>
