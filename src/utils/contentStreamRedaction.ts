@@ -567,12 +567,30 @@ function geometryScore(op: ShowOp, target: RecognizedTextItem): number | null {
 }
 
 /**
+ * 対象テキストのバウンディングボックス内に原点を持つ show-op か判定する。
+ * 同一ベースライン上で対象の横幅に収まる断片（分割OCRレイヤー等）を拾うために使う。
+ */
+function withinTargetBox(op: ShowOp, target: RecognizedTextItem): boolean {
+  const xMin = target.x - ORIGIN_TOLERANCE;
+  const xMax = target.x + target.width + ORIGIN_TOLERANCE;
+  const yTol = Math.max(FONT_SIZE_TOLERANCE_MIN, target.fontSize * 0.5);
+  return (
+    op.origin.x >= xMin &&
+    op.origin.x <= xMax &&
+    Math.abs(op.origin.y - target.y) <= yTol
+  );
+}
+
+/**
  * 対象テキストに対応する show-op 群を選ぶ。
  *
  * 1. 文字列一致（簡易フォントで復号可能な場合）を最優先する。これにより
  *    同一 BT 内で複数回 Tj するPDF（テキスト行列を前進させていないため原点が
  *    重複する）でも、別要素を誤って消すことなく目的の文字列を選べる。
  * 2. 復号できない（CID等）場合は原点＋サイズの幾何一致にフォールバックする。
+ * 3. さらに、対象 bbox 内に収まり対象文字列の部分文字列となる断片オペランドを
+ *    まとめて対象にする。これにより「可視 SECRET ＋ 不可視レイヤーで SEC / RET と
+ *    分割描画」のような分割OCRレイヤーでも、断片を取り残さず除去できる。
  * いずれも、同じ位置に重なる複製（隠しOCRレイヤー等）をまとめて対象にする。
  */
 function selectOpsForTarget(
@@ -583,6 +601,7 @@ function selectOpsForTarget(
   const available = showOps.filter((op) => !used.has(op));
   const wanted = normalizeText(target.text);
 
+  let primary: ShowOp[];
   const textMatches = available.filter(
     (op) => op.decodedText !== null && normalizeText(op.decodedText) === wanted,
   );
@@ -590,15 +609,33 @@ function selectOpsForTarget(
     // 文字列が一致する候補のうち、対象原点に最も近いものと、それと同じ位置に
     // 重なる複製（原点差が許容値以内）をまとめて返す。
     const minDist = Math.min(...textMatches.map((op) => originDistance(op, target)));
-    return textMatches.filter((op) => originDistance(op, target) <= minDist + ORIGIN_TOLERANCE);
+    primary = textMatches.filter((op) => originDistance(op, target) <= minDist + ORIGIN_TOLERANCE);
+  } else {
+    const geo = available
+      .map((op) => ({ op, score: geometryScore(op, target) }))
+      .filter((x): x is { op: ShowOp; score: number } => x.score !== null);
+    if (geo.length === 0) return [];
+    const minScore = Math.min(...geo.map((x) => x.score));
+    primary = geo.filter((x) => x.score <= minScore + 0.5).map((x) => x.op);
   }
 
-  const geo = available
-    .map((op) => ({ op, score: geometryScore(op, target) }))
-    .filter((x): x is { op: ShowOp; score: number } => x.score !== null);
-  if (geo.length === 0) return [];
-  const minScore = Math.min(...geo.map((x) => x.score));
-  return geo.filter((x) => x.score <= minScore + 0.5).map((x) => x.op);
+  if (primary.length === 0) return primary;
+
+  // 対象 bbox 内の断片（部分文字列）を追加で回収する。同一ベースライン・対象の
+  // 横幅内に限定し、対象文字列の部分文字列である復号可能オペランドのみを対象とする
+  // ため、隣接する無関係な語を巻き込まない。
+  if (wanted.length === 0) return primary;
+  const primarySet = new Set(primary);
+  const fragments = available.filter(
+    (op) =>
+      !primarySet.has(op) &&
+      op.decodedText !== null &&
+      normalizeText(op.decodedText).length > 0 &&
+      wanted.includes(normalizeText(op.decodedText)) &&
+      withinTargetBox(op, target),
+  );
+
+  return fragments.length > 0 ? [...primary, ...fragments] : primary;
 }
 
 /**

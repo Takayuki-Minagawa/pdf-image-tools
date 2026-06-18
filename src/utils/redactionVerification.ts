@@ -27,6 +27,27 @@ interface TextContentLike {
   transform?: number[];
 }
 
+interface ExtractedItem {
+  str: string;
+  x: number;
+  y: number;
+}
+
+/**
+ * 対象 bbox 内（同一ベースライン・対象の横幅内）の抽出 item を x 昇順で連結する。
+ * 分割OCRレイヤーのように対象文字列が複数 item に分かれて残っていても検知できる。
+ */
+function joinedTextInBox(items: ExtractedItem[], target: RecognizedTextItem): string {
+  const yTol = Math.max(POSITION_TOLERANCE, target.height * 0.5);
+  const xMin = target.x - POSITION_TOLERANCE;
+  const xMax = target.x + target.width + POSITION_TOLERANCE;
+  return items
+    .filter((it) => it.x >= xMin && it.x <= xMax && Math.abs(it.y - target.y) <= yTol)
+    .sort((a, b) => a.x - b.x)
+    .map((it) => normalize(it.str))
+    .join('');
+}
+
 /**
  * redact 適用後のバイト列を再抽出し、まだ抽出できてしまう対象を返す。
  * 検証自体に失敗した場合は安全側に倒し、全対象を「保証できなかった」として返す。
@@ -60,20 +81,25 @@ export async function findResidualRedactions(
       }
       const page = await doc.getPage(pageIndex + 1);
       const tc = await page.getTextContent();
-      const items = (tc.items as TextContentLike[]).filter(
-        (i): i is { str: string; transform: number[] } =>
-          typeof i.str === 'string' && i.str.trim() !== '' && Array.isArray(i.transform),
-      );
+      const items: ExtractedItem[] = (tc.items as TextContentLike[])
+        .filter(
+          (i): i is { str: string; transform: number[] } =>
+            typeof i.str === 'string' && i.str.trim() !== '' && Array.isArray(i.transform),
+        )
+        .map((i) => ({ str: i.str, x: i.transform[4], y: i.transform[5] }));
 
       for (const target of pageTargets) {
         const wanted = normalize(target.text);
-        const stillThere = items.some((it) => {
-          if (normalize(it.str) !== wanted) return false;
-          const e = it.transform[4];
-          const f = it.transform[5];
-          return Math.hypot(e - target.x, f - target.y) <= POSITION_TOLERANCE;
-        });
-        if (stillThere) residual.push(target);
+        if (wanted.length === 0) continue;
+        // 完全一致の単一 item が原点付近に残っている
+        const exact = items.some(
+          (it) =>
+            normalize(it.str) === wanted &&
+            Math.hypot(it.x - target.x, it.y - target.y) <= POSITION_TOLERANCE,
+        );
+        // 分割OCRレイヤー: bbox 内の隣接 item を連結すると対象文字列が現れる
+        const fragmented = !exact && joinedTextInBox(items, target).includes(wanted);
+        if (exact || fragmented) residual.push(target);
       }
     }
     return residual;
