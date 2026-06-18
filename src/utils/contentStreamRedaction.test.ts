@@ -12,10 +12,20 @@ import {
   pushGraphicsState,
   popGraphicsState,
   translate,
+  beginText,
+  endText,
+  setFontAndSize,
+  setTextMatrix,
+  showText,
+  setTextRenderingMode,
+  TextRenderingMode,
 } from 'pdf-lib';
 import { getDocument } from 'pdfjs-dist';
 import { recognizePageContent } from './contentRecognition';
 import { redactTextFromPage, __testing } from './contentStreamRedaction';
+import { findResidualRedactions } from './redactionVerification';
+import { applyContentEdits } from './contentEditOperations';
+import { createTextEdit } from '../types/contentEdit';
 import type { RecognizedTextItem } from '../types/contentEdit';
 
 async function extractStrings(bytes: Uint8Array): Promise<string[]> {
@@ -147,5 +157,125 @@ describe('redactTextFromPage', () => {
     expect(after).not.toContain('PROPERTY-ABC');
     expect(after).not.toContain('FLOOR-PLAN-2F');
     expect(after).toContain('KEEP-ME');
+  });
+});
+
+describe('P2: 非等方スケールでのフォントサイズ算出（pdf.jsのhypot(c,d)準拠）', () => {
+  it('横方向だけ拡大した cm でも fontSize が Tf と一致する（sqrt(det)ではずれる）', () => {
+    // 横2倍の cm。pdf.js は fontSize=hypot(c,d)=10 を返す（sqrt(det)=14.1ではない）
+    const content = 'q 2 0 0 1 0 0 cm BT /F1 10 Tf 1 0 0 1 50 700 Tm (X) Tj ET Q';
+    const ops = __testing.collectShowOps(content);
+    expect(ops).toHaveLength(1);
+    expect(ops[0].fontSize).toBeCloseTo(10, 5);
+    expect(ops[0].origin.x).toBeCloseTo(100, 5); // 50 × 2
+    expect(ops[0].origin.y).toBeCloseTo(700, 5);
+  });
+});
+
+describe('P1-328: 同一BT内で複数回 Tj するPDF（テキスト行列を前進させない）', () => {
+  // pdf-lib の drawText は Tj ごとに別 BT/Tm を出すため、生オペレータで
+  // 「BT ... (FOO) Tj (BAR) Tj ... ET」（再配置なしの連続Tj）を作る。
+  // 連続Tjは実描画では前進して隣接表示され、pdf.js は1要素に統合して認識する。
+  // エンジンは原点が重複する両Tjをまとめて除去できなければならない
+  // （片方だけ消して成功扱いにする＝サイレント失敗を防ぐ）。
+  async function makeMultiTjPdf(): Promise<Uint8Array> {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([400, 200]);
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    page.drawText('SEED', { x: 10, y: 10, size: 8, font }); // フォントをページ資源に登録
+    page.pushOperators(
+      beginText(),
+      setFontAndSize(font.name, 16),
+      setTextMatrix(1, 0, 0, 1, 50, 150),
+      showText(font.encodeText('FOO')),
+      showText(font.encodeText('BAR')), // 直前のFOOぶん前進しているが Tm 指定なし
+      endText(),
+    );
+    return doc.save();
+  }
+
+  it('原点が重複する連続Tjをまとめて除去し、両方が抽出から消える', async () => {
+    const bytes = await makeMultiTjPdf();
+    const items = await recognizeText(bytes);
+    // 連続表示のため "FOOBAR" を含む1要素として認識される
+    const target = items.find((t) => t.text.includes('FOO') && t.text.includes('BAR'));
+    expect(target).toBeDefined();
+
+    const doc = await PDFDocument.load(bytes);
+    redactTextFromPage(doc, 0, [target!]);
+    const after = await extractStrings(await doc.save());
+    // FOO/BAR どちらの断片も残っていないこと（片側だけ消す失敗をしない）
+    expect(after.join('|')).not.toContain('FOO');
+    expect(after.join('|')).not.toContain('BAR');
+    expect(after).toContain('SEED'); // 無関係なテキストは保持
+  });
+});
+
+describe('P1-423: 同一位置の重複テキスト（隠しOCRレイヤー想定）', () => {
+  async function makeOverlayPdf(): Promise<Uint8Array> {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([400, 200]);
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    page.drawText('SEED', { x: 10, y: 10, size: 8, font });
+    // 同じ位置・同じ文字を「可視」と「不可視(Tr 3)」で二重に描画する
+    page.pushOperators(
+      beginText(),
+      setFontAndSize(font.name, 16),
+      setTextMatrix(1, 0, 0, 1, 50, 150),
+      showText(font.encodeText('SECRET')),
+      endText(),
+      beginText(),
+      setTextRenderingMode(TextRenderingMode.Invisible),
+      setFontAndSize(font.name, 16),
+      setTextMatrix(1, 0, 0, 1, 50, 150),
+      showText(font.encodeText('SECRET')),
+      endText(),
+    );
+    return doc.save();
+  }
+
+  it('重なった複製ごとまとめて除去し、抽出から完全に消える', async () => {
+    const bytes = await makeOverlayPdf();
+    const items = await recognizeText(bytes);
+    const secrets = items.filter((t) => t.text === 'SECRET');
+    // 可視・不可視の2件が認識される（隠しレイヤーも抽出対象）
+    expect(secrets.length).toBeGreaterThanOrEqual(2);
+
+    const doc = await PDFDocument.load(bytes);
+    redactTextFromPage(doc, 0, [secrets[0]]); // 1件だけ指定しても両方消える
+    const after = await extractStrings(await doc.save());
+    expect(after).not.toContain('SECRET');
+  });
+});
+
+describe('findResidualRedactions（redact後の事後検証）', () => {
+  async function makePdf(): Promise<Uint8Array> {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([400, 300]);
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    page.drawText('TARGET', { x: 40, y: 200, size: 16, font });
+    return doc.save();
+  }
+
+  it('対象が残っていれば残存として返し、除去後は空になる', async () => {
+    const bytes = await makePdf();
+    const target = (await recognizeText(bytes)).find((t) => t.text === 'TARGET')!;
+
+    // 未除去のバイト列ではまだ抽出できる → 残存
+    expect(await findResidualRedactions(bytes, [target])).toHaveLength(1);
+
+    // applyContentEdits の redact 適用後は残存なし
+    const out = await applyContentEdits(bytes, [{ ...createTextEdit(target), action: 'redact' }]);
+    expect(await findResidualRedactions(out, [target])).toHaveLength(0);
+  });
+
+  it('完全削除に成功した場合 onWarn は呼ばれない', async () => {
+    const bytes = await makePdf();
+    const target = (await recognizeText(bytes)).find((t) => t.text === 'TARGET')!;
+    let warned: RecognizedTextItem[] | null = null;
+    await applyContentEdits(bytes, [{ ...createTextEdit(target), action: 'redact' }], (u) => {
+      warned = u;
+    });
+    expect(warned).toBeNull();
   });
 });

@@ -43,10 +43,6 @@ function applyMatrix(m: Matrix, x: number, y: number): { x: number; y: number } 
   return { x: m[0] * x + m[2] * y + m[4], y: m[1] * x + m[3] * y + m[5] };
 }
 
-function matrixScale(m: Matrix): number {
-  return Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2]));
-}
-
 // ---- トークナイザ ----------------------------------------------------------
 
 type TokenType = 'num' | 'name' | 'string' | 'array' | 'dictDelim' | 'op';
@@ -239,6 +235,115 @@ interface ShowOp {
   empty: string;
   origin: { x: number; y: number };
   fontSize: number;
+  /**
+   * オペランドから復元した文字列。簡易フォント（WinAnsi等）では target.text と
+   * 比較できる。CID/埋め込みサブセットフォントでは正しく復元できないため null 同然
+   * （その場合は幾何マッチにフォールバックし、最終的に pdf.js 再抽出で検証する）。
+   */
+  decodedText: string | null;
+}
+
+// ---- テキストオペランドの復号（簡易フォント用・ベストエフォート） -----------
+
+const OCTAL = /[0-7]/;
+
+/** リテラル文字列 (...) の中身 [from,to) を復号する。 */
+function decodeLiteral(content: string, from: number, to: number): string {
+  let out = '';
+  for (let i = from; i < to; i++) {
+    const c = content[i];
+    if (c !== '\\') {
+      out += c;
+      continue;
+    }
+    const n = content[i + 1];
+    i++;
+    switch (n) {
+      case 'n': out += '\n'; break;
+      case 'r': out += '\r'; break;
+      case 't': out += '\t'; break;
+      case 'b': out += '\b'; break;
+      case 'f': out += '\f'; break;
+      case '(': out += '('; break;
+      case ')': out += ')'; break;
+      case '\\': out += '\\'; break;
+      case '\n': break; // 行継続
+      case '\r': if (content[i + 1] === '\n') i++; break;
+      default:
+        if (n && OCTAL.test(n)) {
+          let oct = n;
+          while (oct.length < 3 && OCTAL.test(content[i + 1] ?? '')) oct += content[++i];
+          out += String.fromCharCode(parseInt(oct, 8) & 0xff);
+        } else if (n !== undefined) {
+          out += n;
+        }
+    }
+  }
+  return out;
+}
+
+/** 16進文字列 <...> の中身 [from,to) を復号する。 */
+function decodeHex(content: string, from: number, to: number): string {
+  let hex = '';
+  for (let i = from; i < to; i++) {
+    const c = content[i];
+    if (!/\s/.test(c)) hex += c;
+  }
+  if (hex.length % 2 === 1) hex += '0';
+  let out = '';
+  for (let i = 0; i + 1 < hex.length; i += 2) {
+    out += String.fromCharCode(parseInt(hex.slice(i, i + 2), 16) & 0xff);
+  }
+  return out;
+}
+
+/** リテラル文字列の終端 ')'(の次) を返す。エスケープと括弧の入れ子を考慮。 */
+function scanLiteralEnd(content: string, openIdx: number, limit: number): number {
+  let depth = 0;
+  for (let j = openIdx; j < limit; j++) {
+    const c = content[j];
+    if (c === '\\') {
+      j++;
+      continue;
+    }
+    if (c === '(') depth++;
+    else if (c === ')') {
+      depth--;
+      if (depth === 0) return j + 1;
+    }
+  }
+  return limit;
+}
+
+/**
+ * show-op のテキストオペランド [start,end) を文字列へ復号する。
+ * Tj/'/" は文字列トークン、TJ は配列。復号できない場合は空文字を返す。
+ */
+function decodeOperandText(content: string, start: number, end: number): string {
+  const first = content[start];
+  if (first === '(') return decodeLiteral(content, start + 1, end - 1);
+  if (first === '<') return decodeHex(content, start + 1, end - 1);
+  if (first === '[') {
+    let out = '';
+    let i = start + 1;
+    while (i < end - 1) {
+      const c = content[i];
+      if (c === '(') {
+        const j = scanLiteralEnd(content, i, end - 1);
+        out += decodeLiteral(content, i + 1, j - 1);
+        i = j;
+      } else if (c === '<') {
+        let j = content.indexOf('>', i);
+        if (j < 0 || j >= end - 1) j = end - 2;
+        out += decodeHex(content, i + 1, j);
+        i = j + 1;
+      } else {
+        i++;
+      }
+    }
+    return out;
+  }
+  return '';
 }
 
 /** 配列オペランド（[ ... ]）の範囲を直近の '[' まで遡って求める */
@@ -278,8 +383,12 @@ function collectShowOps(content: string): ShowOp[] {
   const computeShow = (operandStart: number, operandEnd: number, empty: string) => {
     const combined = multiplyMatrix(ctm, tm);
     const origin = applyMatrix(combined, 0, 0);
-    const size = Math.abs(fontSize) * matrixScale(tm) * matrixScale(ctm);
-    ops.push({ operandStart, operandEnd, empty, origin, fontSize: size });
+    // pdf.js の getTextContent は fontSize = hypot(transform.c, transform.d) として返す。
+    // テキスト描画行列の縦方向列 = fontSize × combined の (c,d) なので同じ尺度で算出する
+    // （sqrt(det) では非等方スケールやシアーで pdf.js とずれてマッチ失敗するため）。
+    const size = Math.abs(fontSize) * Math.hypot(combined[2], combined[3]);
+    const decoded = decodeOperandText(content, operandStart, operandEnd);
+    ops.push({ operandStart, operandEnd, empty, origin, fontSize: size, decodedText: decoded || null });
   };
 
   for (let idx = 0; idx < tokens.length; idx++) {
@@ -341,6 +450,9 @@ function collectShowOps(content: string): ShowOp[] {
         tlm = multiplyMatrix(tlm, [1, 0, 0, 1, 0, -leading]);
         tm = tlm;
         break;
+      // 注: show-op 後のテキスト行列前進（グリフ幅ぶんの移動）は行っていない。
+      // 同一 BT 内で複数回 Tj するPDFでは後続要素の原点が重複するが、文字列一致
+      // （selectOpsForTarget）で正しい要素を選び、最終的に pdf.js 再抽出で検証する。
       case 'Tj':
       case "'": {
         if (t.text === "'") {
@@ -438,12 +550,55 @@ const ORIGIN_TOLERANCE = 2;
 const FONT_SIZE_TOLERANCE_RATIO = 0.25;
 const FONT_SIZE_TOLERANCE_MIN = 1.5;
 
-function matchScore(op: ShowOp, target: RecognizedTextItem): number | null {
-  const d = Math.hypot(op.origin.x - target.x, op.origin.y - target.y);
+function normalizeText(s: string): string {
+  return s.trim();
+}
+
+function originDistance(op: ShowOp, target: RecognizedTextItem): number {
+  return Math.hypot(op.origin.x - target.x, op.origin.y - target.y);
+}
+
+function geometryScore(op: ShowOp, target: RecognizedTextItem): number | null {
+  const d = originDistance(op, target);
   if (d > ORIGIN_TOLERANCE) return null;
   const sizeTol = Math.max(FONT_SIZE_TOLERANCE_MIN, target.fontSize * FONT_SIZE_TOLERANCE_RATIO);
   if (Math.abs(op.fontSize - target.fontSize) > sizeTol) return null;
   return d;
+}
+
+/**
+ * 対象テキストに対応する show-op 群を選ぶ。
+ *
+ * 1. 文字列一致（簡易フォントで復号可能な場合）を最優先する。これにより
+ *    同一 BT 内で複数回 Tj するPDF（テキスト行列を前進させていないため原点が
+ *    重複する）でも、別要素を誤って消すことなく目的の文字列を選べる。
+ * 2. 復号できない（CID等）場合は原点＋サイズの幾何一致にフォールバックする。
+ * いずれも、同じ位置に重なる複製（隠しOCRレイヤー等）をまとめて対象にする。
+ */
+function selectOpsForTarget(
+  showOps: ShowOp[],
+  used: Set<ShowOp>,
+  target: RecognizedTextItem,
+): ShowOp[] {
+  const available = showOps.filter((op) => !used.has(op));
+  const wanted = normalizeText(target.text);
+
+  const textMatches = available.filter(
+    (op) => op.decodedText !== null && normalizeText(op.decodedText) === wanted,
+  );
+  if (textMatches.length > 0) {
+    // 文字列が一致する候補のうち、対象原点に最も近いものと、それと同じ位置に
+    // 重なる複製（原点差が許容値以内）をまとめて返す。
+    const minDist = Math.min(...textMatches.map((op) => originDistance(op, target)));
+    return textMatches.filter((op) => originDistance(op, target) <= minDist + ORIGIN_TOLERANCE);
+  }
+
+  const geo = available
+    .map((op) => ({ op, score: geometryScore(op, target) }))
+    .filter((x): x is { op: ShowOp; score: number } => x.score !== null);
+  if (geo.length === 0) return [];
+  const minScore = Math.min(...geo.map((x) => x.score));
+  return geo.filter((x) => x.score <= minScore + 0.5).map((x) => x.op);
 }
 
 /**
@@ -471,19 +626,12 @@ export function redactTextFromPage(
   const edits: { start: number; end: number; replacement: string }[] = [];
 
   for (const target of targets) {
-    let best: ShowOp | null = null;
-    let bestScore = Infinity;
-    for (const op of showOps) {
-      if (usedOps.has(op)) continue;
-      const score = matchScore(op, target);
-      if (score !== null && score < bestScore) {
-        best = op;
-        bestScore = score;
+    const selected = selectOpsForTarget(showOps, usedOps, target);
+    if (selected.length > 0) {
+      for (const op of selected) {
+        usedOps.add(op);
+        edits.push({ start: op.operandStart, end: op.operandEnd, replacement: op.empty });
       }
-    }
-    if (best) {
-      usedOps.add(best);
-      edits.push({ start: best.operandStart, end: best.operandEnd, replacement: best.empty });
       removed.push(target);
     } else {
       unmatched.push(target);

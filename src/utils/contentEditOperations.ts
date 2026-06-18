@@ -9,6 +9,7 @@ import type {
 import { toRgb } from './pdfEditOperations';
 import { loadFontBytes } from './fontLoader';
 import { redactTextFromPage } from './contentStreamRedaction';
+import { findResidualRedactions } from './redactionVerification';
 import type { RecognizedTextItem } from '../types/contentEdit';
 
 // テキストのカバー矩形: ベースラインからディセンダー分を下に、文字高+αを上に確保
@@ -134,14 +135,7 @@ export async function applyContentEdits(
   const pageCount = pdfDoc.getPageCount();
 
   // 物理削除はカバー描画より先に、元のストリームに対して行う
-  const unmatched = applyRedactions(pdfDoc, edits, pageCount);
-  if (unmatched.length > 0) {
-    console.warn(
-      `[redact] ${unmatched.length}件のテキストはストリームから除去できませんでした（カバーのみ適用）`,
-      unmatched.map((t) => t.text),
-    );
-    onWarn?.(unmatched);
-  }
+  applyRedactions(pdfDoc, edits, pageCount);
 
   for (const edit of edits) {
     const { pageIndex } = edit.target;
@@ -155,5 +149,23 @@ export async function applyContentEdits(
     }
   }
 
-  return pdfDoc.save();
+  const bytes = await pdfDoc.save();
+
+  // 完全削除は事後検証する: 対象文字が抽出可能なまま残っていれば「保証できなかった」
+  // として通知する（マッチング任せにせず実測で確認する）。
+  const redactTargets = edits
+    .filter((e): e is typeof e & { kind: 'text' } => e.kind === 'text' && e.action === 'redact')
+    .map((e) => e.target);
+  if (redactTargets.length > 0) {
+    const residual = await findResidualRedactions(bytes, redactTargets);
+    if (residual.length > 0) {
+      console.warn(
+        `[redact] ${residual.length}件のテキストはデータから除去できませんでした（カバーのみ適用）`,
+        residual.map((t) => t.text),
+      );
+      onWarn?.(residual);
+    }
+  }
+
+  return bytes;
 }
