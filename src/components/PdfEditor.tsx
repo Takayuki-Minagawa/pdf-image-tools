@@ -463,7 +463,12 @@ export default function PdfEditor() {
 
     // コンテンツ編集は元PDFのページインデックス基準なので、並び替えより先に適用する
     if (contentEdits.length > 0) {
-      workingPdf = await applyContentEdits(workingPdf, contentEdits);
+      workingPdf = await applyContentEdits(workingPdf, contentEdits, (unmatched) => {
+        const names = unmatched.map((t) => `「${t.text}」`).join('、');
+        alert(
+          `次のテキストはデータからの完全削除ができませんでした（カバーのみ適用、テキスト抽出で読める可能性があります）:\n${names}`,
+        );
+      });
     }
 
     if (hasPageChanges) {

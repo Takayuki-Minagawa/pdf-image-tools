@@ -8,11 +8,16 @@
  * pdf.js は Node では legacy ビルドが必要（vite.config.ts の test.alias 参照）。
  */
 import { describe, expect, it } from 'vitest';
-import { PDFDocument, degrees, rgb } from 'pdf-lib';
+import { PDFDocument, StandardFonts, degrees, rgb } from 'pdf-lib';
 import { getDocument } from 'pdfjs-dist';
 import { hitTestRecognizedItems, recognizePageContent } from './contentRecognition';
 import { applyContentEdits } from './contentEditOperations';
-import type { PathContentEdit, RecognizedPathItem } from '../types/contentEdit';
+import { createTextEdit } from '../types/contentEdit';
+import type {
+  PathContentEdit,
+  RecognizedPathItem,
+  RecognizedTextItem,
+} from '../types/contentEdit';
 
 async function loadFirstPage(bytes: Uint8Array) {
   const doc = await getDocument({ data: new Uint8Array(bytes) }).promise;
@@ -43,6 +48,51 @@ function pathEdit(
     ...overrides,
   };
 }
+
+describe('完全削除（redact）— applyContentEdits 経由の統合', () => {
+  async function createTextPdf(): Promise<Uint8Array> {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([400, 500]);
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    page.drawText('BUILDING-NAME', { x: 40, y: 430, size: 18, font });
+    page.drawText('ROOM-101', { x: 40, y: 250, size: 12, font });
+    return doc.save();
+  }
+
+  async function extractStrings(bytes: Uint8Array): Promise<string[]> {
+    const page = await loadFirstPage(bytes);
+    const tc = await page.getTextContent();
+    return (tc.items as { str?: string }[])
+      .filter((i): i is { str: string } => typeof i.str === 'string' && i.str.trim() !== '')
+      .map((i) => i.str);
+  }
+
+  it('redact 適用で対象文字が抽出から消え、他テキストは残る', async () => {
+    const bytes = await createTextPdf();
+    const target = (await recognizeFirstPage(bytes)).find(
+      (i): i is RecognizedTextItem => i.kind === 'text' && i.text === 'BUILDING-NAME',
+    );
+    expect(target).toBeDefined();
+
+    const out = await applyContentEdits(bytes, [{ ...createTextEdit(target!), action: 'redact' }]);
+    const after = await extractStrings(out);
+
+    expect(after).not.toContain('BUILDING-NAME');
+    expect(after).toContain('ROOM-101');
+  });
+
+  it('delete（カバーのみ）では文字データが残り抽出できてしまう（対比）', async () => {
+    const bytes = await createTextPdf();
+    const target = (await recognizeFirstPage(bytes)).find(
+      (i): i is RecognizedTextItem => i.kind === 'text' && i.text === 'BUILDING-NAME',
+    );
+    const out = await applyContentEdits(bytes, [{ ...createTextEdit(target!), action: 'delete' }]);
+    const after = await extractStrings(out);
+
+    // カバーは見た目だけなので、テキスト抽出では依然読める（redact との差を固定）
+    expect(after).toContain('BUILDING-NAME');
+  });
+});
 
 describe('暗黙に閉じられる塗りパス（closePathなしの fill）', () => {
   // M-L-L + fill のみ（closePath なし）の塗り三角形
