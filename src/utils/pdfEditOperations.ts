@@ -1,4 +1,4 @@
-import { PDFDocument, rgb, PDFFont } from 'pdf-lib';
+import { PDFDocument, degrees, rgb, PDFFont, type PDFPage } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import type {
   TextBoxConfig,
@@ -17,6 +17,39 @@ export function toRgb(hex: string) {
     parseInt(result[2], 16) / 255,
     parseInt(result[3], 16) / 255,
   );
+}
+
+function pageVisualGeometry(page: PDFPage) {
+  const { x, y, width, height } = page.getMediaBox();
+  const rotation = ((page.getRotation().angle % 360) + 360) % 360 as 0 | 90 | 180 | 270;
+  const swapsDimensions = rotation === 90 || rotation === 270;
+  return {
+    x,
+    y,
+    width,
+    height,
+    rotation,
+    visualWidth: swapsDimensions ? height : width,
+    visualHeight: swapsDimensions ? width : height,
+  };
+}
+
+/** 回転後に見えるページの左上座標を、PDFユーザー空間へ戻す。 */
+export function visualPointToPdf(page: PDFPage, visualX: number, visualY: number) {
+  const geometry = pageVisualGeometry(page);
+  switch (geometry.rotation) {
+    case 90:
+      return { x: geometry.x + visualY, y: geometry.y + visualX };
+    case 180:
+      return { x: geometry.x + geometry.width - visualX, y: geometry.y + visualY };
+    case 270:
+      return {
+        x: geometry.x + geometry.width - visualY,
+        y: geometry.y + geometry.height - visualX,
+      };
+    default:
+      return { x: geometry.x + visualX, y: geometry.y + geometry.height - visualY };
+  }
 }
 
 function isCjkChar(char: string): boolean {
@@ -160,19 +193,18 @@ function applyTextBoxes(pdfDoc: PDFDocument, textBoxes: TextBoxConfig[], font: P
 
     for (const pageIdx of pagesToApply) {
       const page = pdfDoc.getPage(pageIdx);
-      const { height: pageHeight } = page.getSize();
-
-      // Convert from top-origin Y to bottom-origin Y
-      const pdfY = pageHeight - box.y - box.height;
+      const rotation = pageVisualGeometry(page).rotation;
+      const rectangleOrigin = visualPointToPdf(page, box.x, box.y + box.height);
 
       // Draw background
       if (box.backgroundColor !== 'transparent' && box.backgroundColor !== '') {
         page.drawRectangle({
-          x: box.x,
-          y: pdfY,
+          x: rectangleOrigin.x,
+          y: rectangleOrigin.y,
           width: box.width,
           height: box.height,
           color: toRgb(box.backgroundColor),
+          rotate: degrees(rotation),
         });
       }
 
@@ -186,13 +218,14 @@ function applyTextBoxes(pdfDoc: PDFDocument, textBoxes: TextBoxConfig[], font: P
               : undefined;
 
         page.drawRectangle({
-          x: box.x,
-          y: pdfY,
+          x: rectangleOrigin.x,
+          y: rectangleOrigin.y,
           width: box.width,
           height: box.height,
           borderColor: toRgb(box.borderColor),
           borderWidth: box.borderWidth,
           borderDashArray,
+          rotate: degrees(rotation),
         });
       }
 
@@ -204,15 +237,17 @@ function applyTextBoxes(pdfDoc: PDFDocument, textBoxes: TextBoxConfig[], font: P
         const lineHeight = box.fontSize * 1.3;
 
         for (let i = 0; i < lines.length; i++) {
-          const textY = pdfY + box.height - padding - box.fontSize - i * lineHeight;
-          if (textY < pdfY + padding) break;
+          const visualBaselineY = box.y + padding + box.fontSize + i * lineHeight;
+          if (visualBaselineY > box.y + box.height - padding) break;
+          const textOrigin = visualPointToPdf(page, box.x + padding, visualBaselineY);
 
           page.drawText(lines[i], {
-            x: box.x + padding,
-            y: textY,
+            x: textOrigin.x,
+            y: textOrigin.y,
             size: box.fontSize,
             font,
             color: toRgb(box.fontColor),
+            rotate: degrees(rotation),
           });
         }
       }
@@ -230,7 +265,7 @@ function applyHeaderFooter(
 
   for (let i = 0; i < pageCount; i++) {
     const page = pdfDoc.getPage(i);
-    const { width: pageWidth, height: pageHeight } = page.getSize();
+    const geometry = pageVisualGeometry(page);
     const pageNum = i + 1;
 
     const drawSection = (config: HeaderFooterSettings['header'], isHeader: boolean) => {
@@ -238,14 +273,14 @@ function applyHeaderFooter(
 
       // drawText positions by baseline; offset by ascent (header) / descent (footer)
       // so the text edge aligns with the margin
-      let y: number;
+      let visualY: number;
       if (isHeader) {
         const ascent = font.heightAtSize(fontSize, { descender: false });
-        y = pageHeight - margin - ascent;
+        visualY = margin + ascent;
       } else {
         const descent =
           font.heightAtSize(fontSize) - font.heightAtSize(fontSize, { descender: false });
-        y = margin + descent;
+        visualY = geometry.visualHeight - margin - descent;
       }
 
       const draw = (text: string, align: 'left' | 'center' | 'right') => {
@@ -254,10 +289,18 @@ function applyHeaderFooter(
         const textWidth = font.widthOfTextAtSize(resolved, fontSize);
         let x: number;
         if (align === 'left') x = marginHorizontal;
-        else if (align === 'center') x = (pageWidth - textWidth) / 2;
-        else x = pageWidth - marginHorizontal - textWidth;
+        else if (align === 'center') x = (geometry.visualWidth - textWidth) / 2;
+        else x = geometry.visualWidth - marginHorizontal - textWidth;
 
-        page.drawText(resolved, { x, y, size: fontSize, font, color: toRgb(fontColor) });
+        const origin = visualPointToPdf(page, x, visualY);
+        page.drawText(resolved, {
+          x: origin.x,
+          y: origin.y,
+          size: fontSize,
+          font,
+          color: toRgb(fontColor),
+          rotate: degrees(geometry.rotation),
+        });
       };
 
       draw(left, 'left');
@@ -272,12 +315,13 @@ function applyHeaderFooter(
 
 function applyPageNumbers(pdfDoc: PDFDocument, config: PageNumberingConfig, font: PDFFont) {
   const pageCount = pdfDoc.getPageCount();
+  const startIndex = Math.max(0, config.startPage - 1);
 
-  for (let i = config.startPage - 1; i < pageCount; i++) {
+  for (let i = startIndex; i < pageCount; i++) {
     const page = pdfDoc.getPage(i);
-    const { width: pageWidth, height: pageHeight } = page.getSize();
+    const geometry = pageVisualGeometry(page);
 
-    const displayNum = config.startNumber + (i - (config.startPage - 1));
+    const displayNum = config.startNumber + (i - startIndex);
     const text = formatPageNumber(displayNum, config.format, config.prefix, config.suffix);
     const textWidth = font.widthOfTextAtSize(text, config.fontSize);
 
@@ -285,26 +329,29 @@ function applyPageNumbers(pdfDoc: PDFDocument, config: PageNumberingConfig, font
     if (config.position.includes('left')) {
       x = config.margin;
     } else if (config.position.includes('right')) {
-      x = pageWidth - config.margin - textWidth;
+      x = geometry.visualWidth - config.margin - textWidth;
     } else {
-      x = (pageWidth - textWidth) / 2;
+      x = (geometry.visualWidth - textWidth) / 2;
     }
 
-    let y: number;
+    let visualY: number;
     if (config.position.startsWith('top')) {
       const ascent = font.heightAtSize(config.fontSize, { descender: false });
-      y = pageHeight - config.margin - ascent;
+      visualY = config.margin + ascent;
     } else {
       const descent = font.heightAtSize(config.fontSize) - font.heightAtSize(config.fontSize, { descender: false });
-      y = config.margin + descent;
+      visualY = geometry.visualHeight - config.margin - descent;
     }
 
+    const origin = visualPointToPdf(page, x, visualY);
+
     page.drawText(text, {
-      x,
-      y,
+      x: origin.x,
+      y: origin.y,
       size: config.fontSize,
       font,
       color: toRgb(config.fontColor),
+      rotate: degrees(geometry.rotation),
     });
   }
 }

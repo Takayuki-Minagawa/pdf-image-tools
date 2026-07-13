@@ -7,8 +7,17 @@
  *
  * pdf.js は Node では legacy ビルドが必要（vite.config.ts の test.alias 参照）。
  */
-import { describe, expect, it } from 'vitest';
-import { PDFDocument, StandardFonts, degrees, rgb } from 'pdf-lib';
+import { readFile } from 'node:fs/promises';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  PDFDocument,
+  PDFRawStream,
+  PDFStream,
+  StandardFonts,
+  decodePDFRawStream,
+  degrees,
+  rgb,
+} from 'pdf-lib';
 import { getDocument } from 'pdfjs-dist';
 import { hitTestRecognizedItems, recognizePageContent } from './contentRecognition';
 import { applyContentEdits } from './contentEditOperations';
@@ -52,6 +61,7 @@ function pathEdit(
 describe('完全削除（redact）— applyContentEdits 経由の統合', () => {
   async function createTextPdf(): Promise<Uint8Array> {
     const doc = await PDFDocument.create();
+    doc.setTitle('Redaction test');
     const page = doc.addPage([400, 500]);
     const font = await doc.embedFont(StandardFonts.Helvetica);
     page.drawText('BUILDING-NAME', { x: 40, y: 430, size: 18, font });
@@ -79,6 +89,61 @@ describe('完全削除（redact）— applyContentEdits 経由の統合', () => 
 
     expect(after).not.toContain('BUILDING-NAME');
     expect(after).toContain('ROOM-101');
+  });
+
+  it('embeds replacement font data before reachable-only redaction serialization', async () => {
+    const fontBytes = await readFile(new URL('../../public/fonts/NotoSansJP.ttf', import.meta.url));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(new Uint8Array(fontBytes)),
+    );
+    try {
+      const bytes = await createTextPdf();
+      const items = await recognizeFirstPage(bytes);
+      const redactTarget = items.find(
+        (item): item is RecognizedTextItem => item.kind === 'text' && item.text === 'BUILDING-NAME',
+      );
+      const replaceTarget = items.find(
+        (item): item is RecognizedTextItem => item.kind === 'text' && item.text === 'ROOM-101',
+      );
+      expect(redactTarget).toBeDefined();
+      expect(replaceTarget).toBeDefined();
+
+      const replacement = createTextEdit(replaceTarget!);
+      replacement.newText = 'ROOM-202';
+      const output = await applyContentEdits(bytes, [
+        { ...createTextEdit(redactTarget!), action: 'redact' },
+        replacement,
+      ]);
+      const after = await extractStrings(output);
+
+      expect(after).not.toContain('BUILDING-NAME');
+      expect(after).toContain('ROOM-202');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('差し替え前の孤児コンテンツストリームも保存ファイルから除去する', async () => {
+    const bytes = await createTextPdf();
+    const target = (await recognizeFirstPage(bytes)).find(
+      (item): item is RecognizedTextItem => item.kind === 'text' && item.text === 'BUILDING-NAME',
+    );
+    const output = await applyContentEdits(bytes, [{ ...createTextEdit(target!), action: 'redact' }]);
+    const loaded = await PDFDocument.load(output);
+    expect(loaded.getTitle()).toBe('Redaction test');
+    const needle = Array.from(new TextEncoder().encode('BUILDING-NAME'))
+      .map((value) => value.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
+    const decodedStreams = loaded.context.enumerateIndirectObjects().flatMap(([, object]) => {
+      if (!(object instanceof PDFStream)) return [];
+      const bytes = object instanceof PDFRawStream
+        ? decodePDFRawStream(object).decode()
+        : (object as PDFStream & { getUnencodedContents?: () => Uint8Array }).getUnencodedContents?.();
+      return bytes ? [new TextDecoder('latin1').decode(bytes).toUpperCase()] : [];
+    });
+
+    expect(decodedStreams.some((stream) => stream.includes(needle))).toBe(false);
   });
 
   it('delete（カバーのみ）では文字データが残り抽出できてしまう（対比）', async () => {

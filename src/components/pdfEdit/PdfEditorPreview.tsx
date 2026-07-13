@@ -51,14 +51,17 @@ export function PdfEditorPreview({
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-gray-100 p-3">
         <div className="flex items-center gap-2">
           <button
+            type="button"
             onClick={onPrevPage}
             disabled={currentPage <= 1}
+            aria-label="前のページ"
             className="rounded-lg bg-white p-1.5 shadow-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <ChevronLeft className="h-4 w-4" />
           </button>
           <div className="flex items-center gap-1 text-sm">
             <input
+              aria-label="表示するページ番号"
               type="text"
               inputMode="numeric"
               value={pageInputValue}
@@ -70,8 +73,10 @@ export function PdfEditorPreview({
             <span className="text-gray-500">/ {displayPageCount}</span>
           </div>
           <button
+            type="button"
             onClick={onNextPage}
             disabled={currentPage >= displayPageCount}
+            aria-label="次のページ"
             className="rounded-lg bg-white p-1.5 shadow-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <ChevronRight className="h-4 w-4" />
@@ -80,13 +85,16 @@ export function PdfEditorPreview({
 
         <div className="flex items-center gap-2">
           <button
+            type="button"
             onClick={onZoomOut}
             disabled={scale <= 0.25}
+            aria-label="縮小"
             className="rounded-lg bg-white p-1.5 shadow-sm hover:bg-gray-50 disabled:opacity-50"
           >
             <ZoomOut className="h-4 w-4" />
           </button>
           <select
+            aria-label="ズーム倍率"
             value={scale}
             onChange={(e) => onScaleChange(parseFloat(e.target.value))}
             className="min-w-[80px] rounded-lg border border-gray-300 bg-white px-2 py-1 text-sm"
@@ -98,8 +106,10 @@ export function PdfEditorPreview({
             ))}
           </select>
           <button
+            type="button"
             onClick={onZoomIn}
             disabled={scale >= 3}
+            aria-label="拡大"
             className="rounded-lg bg-white p-1.5 shadow-sm hover:bg-gray-50 disabled:opacity-50"
           >
             <ZoomIn className="h-4 w-4" />
@@ -109,14 +119,16 @@ export function PdfEditorPreview({
 
       <div
         ref={containerRef}
+        aria-label={`PDFプレビュー ${currentPage}/${displayPageCount}ページ`}
         className="max-h-[600px] overflow-auto rounded-lg bg-gray-200 p-4"
       >
         <div className="flex justify-center">
           <div className="relative inline-block">
-            <canvas ref={canvasRef} className="bg-white shadow-lg" />
+            <canvas ref={canvasRef} className="bg-white shadow-lg" aria-label={`${currentPage}ページ目の内容`} />
             <canvas
               ref={overlayCanvasRef}
               onClick={onCanvasClick}
+              aria-label={isTextPlacementActive ? 'テキストボックスの配置位置を選択' : isContentSelectionActive ? '編集するコンテンツを選択' : undefined}
               className={`absolute inset-0 ${
                 isTextPlacementActive
                   ? 'cursor-crosshair'

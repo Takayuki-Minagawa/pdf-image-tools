@@ -3,7 +3,10 @@ import { TextBoxEditor } from './TextBoxEditor';
 import { HeaderFooterEditor } from './HeaderFooterEditor';
 import { PageNumberEditor } from './PageNumberEditor';
 import { ContentEditPanel } from './ContentEditPanel';
-import type { TextBoxConfig, HeaderFooterSettings, PageNumberingConfig } from '../../types/pdfEdit';
+import { ImageExportSettings } from './ImageExportSettings';
+import { RecipeManager } from './RecipeManager';
+import type { TextBoxConfig, HeaderFooterSettings, PageNumberingConfig, PdfImageExportOptions } from '../../types/pdfEdit';
+import type { PdfEditRecipe } from '../../utils/recipeStorage';
 import type { ContentEdit, RecognizedItem } from '../../types/contentEdit';
 
 export type EditorSubTab = 'content' | 'textbox' | 'header-footer' | 'page-number';
@@ -32,6 +35,10 @@ interface PdfEditorSidebarProps {
   onExportPng: () => void;
   isSavingPdf: boolean;
   isExportingPng: boolean;
+  imageExportOptions: PdfImageExportOptions;
+  onImageExportOptionsChange: (options: PdfImageExportOptions) => void;
+  selectedPageCount: number;
+  onApplyRecipe: (recipe: PdfEditRecipe) => void;
 }
 
 const SUB_TABS: { key: EditorSubTab; label: string; icon: typeof Type }[] = [
@@ -65,6 +72,10 @@ export function PdfEditorSidebar({
   onExportPng,
   isSavingPdf,
   isExportingPng,
+  imageExportOptions,
+  onImageExportOptionsChange,
+  selectedPageCount,
+  onApplyRecipe,
 }: PdfEditorSidebarProps) {
   return (
     <div className="shrink-0 space-y-3 lg:w-80">
@@ -123,6 +134,19 @@ export function PdfEditorSidebar({
       </div>
 
       <div className="space-y-2">
+        <ImageExportSettings
+          options={imageExportOptions}
+          totalPages={totalPages}
+          selectedCount={selectedPageCount}
+          onChange={onImageExportOptionsChange}
+        />
+        <RecipeManager
+          textBoxes={textBoxes}
+          headerFooter={headerFooter}
+          pageNumbering={pageNumbering}
+          imageExportOptions={imageExportOptions}
+          onApply={onApplyRecipe}
+        />
         <button
           onClick={onSavePdf}
           disabled={isSavingPdf || isExportingPng}

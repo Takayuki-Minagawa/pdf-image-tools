@@ -61,6 +61,43 @@ export interface PdfEditState {
   pageNumbering: PageNumberingConfig;
 }
 
+/**
+ * 編集画面に表示される1ページ分の計画。
+ * sourcePageIndex が null の場合は新規の空白ページを表す。
+ * id を持たせることで、同じ元ページを複製しても個別に並び替え・回転できる。
+ */
+export interface PagePlanEntry {
+  id: string;
+  sourcePageIndex: number | null;
+  rotation: 0 | 90 | 180 | 270;
+  width?: number;
+  height?: number;
+}
+
+export type ImageExportFormat = 'png' | 'jpeg' | 'webp';
+
+export interface PdfImageExportOptions {
+  filename: string;
+  format: ImageExportFormat;
+  scale: number;
+  quality: number;
+  pageMode: 'all' | 'selected' | 'range';
+  rangeStart: number;
+  rangeEnd: number;
+  zip: boolean;
+}
+
+export const DEFAULT_IMAGE_EXPORT_OPTIONS: PdfImageExportOptions = {
+  filename: 'edited-pages',
+  format: 'png',
+  scale: 2,
+  quality: 0.92,
+  pageMode: 'all',
+  rangeStart: 1,
+  rangeEnd: 1,
+  zip: true,
+};
+
 export const DEFAULT_HEADER_FOOTER: HeaderFooterSettings = {
   header: {
     enabled: false,
