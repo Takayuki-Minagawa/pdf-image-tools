@@ -20,9 +20,7 @@ export function toRgb(hex: string) {
 }
 
 function pageVisualGeometry(page: PDFPage) {
-  const { width, height } = page.getSize();
-  const x = page.getX();
-  const y = page.getY();
+  const { x, y, width, height } = page.getMediaBox();
   const rotation = ((page.getRotation().angle % 360) + 360) % 360 as 0 | 90 | 180 | 270;
   const swapsDimensions = rotation === 90 || rotation === 270;
   return {
@@ -317,12 +315,13 @@ function applyHeaderFooter(
 
 function applyPageNumbers(pdfDoc: PDFDocument, config: PageNumberingConfig, font: PDFFont) {
   const pageCount = pdfDoc.getPageCount();
+  const startIndex = Math.max(0, config.startPage - 1);
 
-  for (let i = config.startPage - 1; i < pageCount; i++) {
+  for (let i = startIndex; i < pageCount; i++) {
     const page = pdfDoc.getPage(i);
     const geometry = pageVisualGeometry(page);
 
-    const displayNum = config.startNumber + (i - (config.startPage - 1));
+    const displayNum = config.startNumber + (i - startIndex);
     const text = formatPageNumber(displayNum, config.format, config.prefix, config.suffix);
     const textWidth = font.widthOfTextAtSize(text, config.fontSize);
 

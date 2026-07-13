@@ -19,7 +19,14 @@ import { PageManagementPanel } from './pdfEdit/PageManagementPanel';
 import { PdfEditorSidebar, type EditorSubTab } from './pdfEdit/PdfEditorSidebar';
 import { PdfEditorPreview } from './pdfEdit/PdfEditorPreview';
 import { applyPdfEdits } from '../utils/pdfEditOperations';
-import { buildPdfFromPagePlan, downloadPdf, extractPdfPageIndices } from '../utils/pdfEditor';
+import {
+  buildPdfFromPagePlan,
+  copyPdfBytes,
+  downloadPdf,
+  duplicatePagePlanSelection,
+  extractPdfPageIndices,
+  getUnrotatedPageSize,
+} from '../utils/pdfEditor';
 import { pdfBytesToImages } from '../utils/pdfToImages';
 import { usePdfDocument } from '../hooks/usePdfDocument';
 import { useUndoHistory } from '../hooks/useUndoHistory';
@@ -47,7 +54,7 @@ import {
   DEFAULT_PAGE_NUMBERING,
 } from '../types/pdfEdit';
 import type { ContentEdit, RecognizedItem } from '../types/contentEdit';
-import type { PageViewport } from 'pdfjs-dist';
+import type { PageViewport, RenderTask } from 'pdfjs-dist';
 import {
   deletePdfDraft,
   getStorageSummary,
@@ -59,7 +66,18 @@ import {
 } from '../utils/draftStorage';
 import type { PdfEditRecipe } from '../utils/recipeStorage';
 import { downloadDataUrlsAsZip, sanitizeFilename } from '../utils/download';
-import { consumePendingPdf, subscribePdfEditorHandoff } from '../utils/workflowHandoff';
+import {
+  consumePendingPdf,
+  peekPendingPdf,
+  subscribePdfEditorHandoff,
+} from '../utils/workflowHandoff';
+
+type RedactionFailureOperation = 'save' | 'extract-range' | 'extract-selected' | 'export-images';
+
+interface RedactionFailureState {
+  error: RedactionVerificationError;
+  operation: RedactionFailureOperation;
+}
 
 function createInitialPageEntries(pageCount: number): PagePlanEntry[] {
   return Array.from({ length: pageCount }, (_, sourcePageIndex) => ({
@@ -145,7 +163,7 @@ export default function PdfEditor() {
   const [pdfOutputName, setPdfOutputName] = useState('edited');
   const [imageExportOptions, setImageExportOptions] = useState<PdfImageExportOptions>(loadImageExportOptions);
   const exportAbortRef = useRef<AbortController | null>(null);
-  const [redactionFailure, setRedactionFailure] = useState<RedactionVerificationError | null>(null);
+  const [redactionFailure, setRedactionFailure] = useState<RedactionFailureState | null>(null);
   const [redactionVerifiedAt, setRedactionVerifiedAt] = useState<number | null>(null);
   const [availableDraft, setAvailableDraft] = useState<StoredPdfDraft | null>(null);
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(
@@ -157,6 +175,7 @@ export default function PdfEditor() {
   const [pdfPassword, setPdfPassword] = useState('');
   const pendingDraftRef = useRef<StoredPdfDraft | null>(null);
   const savedSignatureRef = useRef('');
+  const redactionDraftBlockedRef = useRef(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -183,6 +202,7 @@ export default function PdfEditor() {
   const hasRedactions = contentEdits.some(
     (edit) => edit.kind === 'text' && edit.action === 'redact',
   );
+  redactionDraftBlockedRef.current = hasRedactions;
   const hasPageChanges =
     pageEntries.length > 0 &&
     (pageEntries.length !== originalTotalPages ||
@@ -232,7 +252,7 @@ export default function PdfEditor() {
 
   useEffect(() => {
     setRedactionVerifiedAt(null);
-  }, [contentEdits]);
+  }, [snapshotSignature]);
 
   useEffect(() => {
     if (!pdf) {
@@ -306,6 +326,9 @@ export default function PdfEditor() {
   }, [activeSubTab, pdf, currentOriginalPageIndex, recognizedByPage]);
 
   useEffect(() => {
+    let cancelled = false;
+    let renderTask: RenderTask | null = null;
+
     const renderPage = async () => {
       if (!pdf || !canvasRef.current || displayPageCount === 0) return;
 
@@ -330,6 +353,7 @@ export default function PdfEditor() {
       }
 
       const page = await pdf.getPage(entry.sourcePageIndex + 1);
+      if (cancelled) return;
       const viewport = page.getViewport({ scale, rotation: (page.rotate + entry.rotation) % 360 });
       canvas.width = viewport.width;
       canvas.height = viewport.height;
@@ -338,14 +362,23 @@ export default function PdfEditor() {
       setPageSize({ width: originalViewport.width, height: originalViewport.height });
       setPageViewport(viewport);
 
-      await page.render({
+      renderTask = page.render({
         canvasContext: context,
         viewport,
         canvas,
-      }).promise;
+      });
+      await renderTask.promise;
     };
 
-    renderPage();
+    void renderPage().catch((error) => {
+      if (cancelled || (error instanceof Error && error.name === 'RenderingCancelledException')) return;
+      console.error(error);
+    });
+
+    return () => {
+      cancelled = true;
+      renderTask?.cancel();
+    };
   }, [pdf, currentPage, scale, pageEntries, displayPageCount]);
 
   useEffect(() => {
@@ -450,7 +483,34 @@ export default function PdfEditor() {
   }, [imageExportOptions]);
 
   useEffect(() => {
-    if (!autoSaveEnabled || !pdfFile || loadedFile !== pdfFile || !pdfBytes || !pdf || pageEntries.length === 0) return;
+    if (!hasRedactions) return;
+    let cancelled = false;
+    void deletePdfDraft()
+      .then(() => {
+        if (cancelled) return;
+        setAvailableDraft(null);
+        setDraftSavedAt(null);
+        setDraftStatus('idle');
+        void getStorageSummary().then(setStorageSummary).catch(() => undefined);
+      })
+      .catch((error) => console.warn('墨消しを含む下書きを削除できませんでした', error));
+    return () => {
+      cancelled = true;
+    };
+  }, [hasRedactions]);
+
+  useEffect(() => {
+    if (
+      !autoSaveEnabled ||
+      !isDirty ||
+      hasRedactions ||
+      !pdfFile ||
+      loadedFile !== pdfFile ||
+      !pdfBytes ||
+      !pdf ||
+      pageEntries.length === 0
+    ) return;
+    let cancelled = false;
     setDraftStatus('saving');
     const timeout = window.setTimeout(() => {
       savePdfDraft({
@@ -464,17 +524,31 @@ export default function PdfEditor() {
         activeSubTab,
         imageExportOptions,
         savedAt: Date.now(),
-      }).then(() => {
+      }).then(async () => {
+        if (redactionDraftBlockedRef.current) {
+          await deletePdfDraft();
+          if (!cancelled) {
+            setDraftSavedAt(null);
+            setDraftStatus('idle');
+          }
+          return;
+        }
+        savedSignatureRef.current = snapshotSignature;
+        if (cancelled) return;
         setDraftSavedAt(Date.now());
         setDraftStatus('saved');
         void getStorageSummary().then(setStorageSummary).catch(() => undefined);
       }).catch((error) => {
+        if (cancelled) return;
         console.warn('下書きを保存できませんでした', error);
         setDraftStatus('error');
       });
     }, 900);
-    return () => window.clearTimeout(timeout);
-  }, [activeSubTab, autoSaveEnabled, currentPage, editSnapshot, imageExportOptions, loadedFile, pageEntries.length, pdf, pdfBytes, pdfFile, scale, snapshotSignature]);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [activeSubTab, autoSaveEnabled, currentPage, editSnapshot, hasRedactions, imageExportOptions, isDirty, loadedFile, pageEntries.length, pdf, pdfBytes, pdfFile, scale, snapshotSignature]);
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -592,9 +666,12 @@ export default function PdfEditor() {
 
   useEffect(() => {
     const consume = () => {
-      const file = consumePendingPdf();
+      const file = peekPendingPdf();
       if (!file) return;
-      if (handleFileDrop([file])) setOutputMessage('前のツールからPDFを受け取りました');
+      if (handleFileDrop([file])) {
+        consumePendingPdf();
+        setOutputMessage('前のツールからPDFを受け取りました');
+      }
     };
     consume();
     return subscribePdfEditorHandoff(consume);
@@ -745,38 +822,33 @@ export default function PdfEditor() {
 
   const duplicateSelectedPages = () => {
     if (selectedPages.size === 0) return;
-    const duplicateIds = new Map<string, string>();
-    const nextEntries = pageEntries.flatMap((entry, index) => {
-      if (!selectedPages.has(index)) return [entry];
-      const duplicateId = crypto.randomUUID();
-      duplicateIds.set(entry.id, duplicateId);
-      return [entry, { ...entry, id: duplicateId }];
-    });
-    updatePageEntries(nextEntries);
-    setTextBoxes((current) => {
-      const copies = current.flatMap((box) => {
-        if (box.pageIndex < 0) return [];
-        const sourceEntryId = nextEntries[box.pageIndex]?.id;
-        if (!sourceEntryId || !duplicateIds.has(sourceEntryId)) return [];
-        const targetId = duplicateIds.get(sourceEntryId)!;
-        const nextIndex = nextEntries.findIndex((entry) => entry.id === targetId);
-        return [{ ...box, id: crypto.randomUUID(), pageIndex: nextIndex }];
-      });
-      return current.concat(copies);
-    });
+    const duplicated = duplicatePagePlanSelection(
+      pageEntries,
+      selectedPages,
+      textBoxes,
+      contentEdits,
+    );
+    pageEntriesRef.current = duplicated.pageEntries;
+    setPageEntries(duplicated.pageEntries);
+    setTextBoxes(duplicated.textBoxes);
+    setContentEdits(duplicated.contentEdits);
     setSelectedPages(new Set());
     setPngImages([]);
   };
 
   const insertBlankPage = () => {
     const insertAt = Math.min(currentPage, pageEntries.length);
+    const unrotatedPageSize = getUnrotatedPageSize(
+      pageSize,
+      currentPageEntry?.rotation ?? 0,
+    );
     const nextEntries = [...pageEntries];
     nextEntries.splice(insertAt, 0, {
       id: crypto.randomUUID(),
       sourcePageIndex: null,
       rotation: 0,
-      width: pageSize.width || 595.28,
-      height: pageSize.height || 841.89,
+      width: unrotatedPageSize.width || 595.28,
+      height: unrotatedPageSize.height || 841.89,
     });
     updatePageEntries(nextEntries);
     setCurrentPage(insertAt + 1);
@@ -862,10 +934,8 @@ export default function PdfEditor() {
           undefined,
           { failOnResidual: true },
         );
-        if (hasRedactions) setRedactionVerifiedAt(Date.now());
       } catch (error) {
         if (!(error instanceof RedactionVerificationError)) throw error;
-        setRedactionFailure(error);
         if (!allowCoverOnly) throw error;
         workingPdf = error.coveredPdfBytes;
       }
@@ -879,7 +949,7 @@ export default function PdfEditor() {
       );
     }
 
-    return workingPdf instanceof Uint8Array ? workingPdf : new Uint8Array(workingPdf);
+    return copyPdfBytes(workingPdf);
   }, [
     pdfBytes,
     pdfFile,
@@ -890,10 +960,9 @@ export default function PdfEditor() {
     headerFooter,
     pageNumbering,
     contentEdits,
-    hasRedactions,
   ]);
 
-  const handleExtract = async () => {
+  const handleExtract = async (allowCoverOnly = false) => {
     if (!pdfFile) return;
 
     const start = parseInt(extractStart, 10);
@@ -911,32 +980,38 @@ export default function PdfEditor() {
     }
 
     try {
-      const editedPdf = await buildEditedPdf();
+      const editedPdf = await buildEditedPdf(allowCoverOnly);
       const extractedPdf = await extractPdfPageIndices(
         editedPdf,
         Array.from({ length: end - start + 1 }, (_, index) => start - 1 + index),
       );
       downloadPdf(extractedPdf, `${pdfFile.name.replace('.pdf', '')}_pages_${start}-${end}.pdf`);
+      setRedactionFailure(null);
     } catch (err) {
       console.error(err);
-      if (!(err instanceof RedactionVerificationError)) {
+      if (err instanceof RedactionVerificationError) {
+        setRedactionFailure({ error: err, operation: 'extract-range' });
+      } else {
         setOutputError('抽出中にエラーが発生しました: ' + (err instanceof Error ? err.message : '不明なエラー'));
       }
     }
   };
 
-  const handleExtractSelected = async () => {
+  const handleExtractSelected = async (allowCoverOnly = false) => {
     if (selectedPages.size === 0) return;
     setOutputError(null);
     try {
-      const editedPdf = await buildEditedPdf();
+      const editedPdf = await buildEditedPdf(allowCoverOnly);
       const pageIndices = [...selectedPages].sort((a, b) => a - b);
       const extractedPdf = await extractPdfPageIndices(editedPdf, pageIndices);
       downloadPdf(extractedPdf, `${sanitizeFilename(pdfOutputName, 'selected-pages')}_selected.pdf`);
+      setRedactionFailure(null);
       setOutputMessage(`${pageIndices.length}ページを抽出しました`);
     } catch (error) {
       console.error(error);
-      if (!(error instanceof RedactionVerificationError)) {
+      if (error instanceof RedactionVerificationError) {
+        setRedactionFailure({ error, operation: 'extract-selected' });
+      } else {
         setOutputError(error instanceof Error ? error.message : '選択ページを抽出できませんでした');
       }
     }
@@ -952,13 +1027,21 @@ export default function PdfEditor() {
     try {
       const result = await buildEditedPdf(allowCoverOnly);
       const filename = `${sanitizeFilename(pdfOutputName, 'edited')}.pdf`;
+      await deletePdfDraft();
       downloadPdf(result, filename);
       savedSignatureRef.current = snapshotSignature;
+      setAvailableDraft(null);
+      setDraftSavedAt(null);
+      setDraftStatus('idle');
       setRedactionFailure(null);
+      setRedactionVerifiedAt(hasRedactions && !allowCoverOnly ? Date.now() : null);
+      void getStorageSummary().then(setStorageSummary).catch(() => undefined);
       setOutputMessage(`${filename}（${formatBytes(result.byteLength)}）を保存しました`);
     } catch (err) {
       console.error(err);
-      if (!(err instanceof RedactionVerificationError)) {
+      if (err instanceof RedactionVerificationError) {
+        setRedactionFailure({ error: err, operation: 'save' });
+      } else {
         setOutputError('PDF保存中にエラーが発生しました: ' + (err instanceof Error ? err.message : '不明なエラー'));
       }
     } finally {
@@ -966,7 +1049,7 @@ export default function PdfEditor() {
     }
   };
 
-  const handleExportPng = async () => {
+  const handleExportPng = async (allowCoverOnly = false) => {
     if (!pdfFile) return;
 
     setIsExportingPng(true);
@@ -978,7 +1061,7 @@ export default function PdfEditor() {
     exportAbortRef.current = controller;
 
     try {
-      const result = await buildEditedPdf();
+      const result = await buildEditedPdf(allowCoverOnly);
       let pageIndices: number[] | undefined;
       if (imageExportOptions.pageMode === 'selected') {
         pageIndices = [...selectedPages].sort((a, b) => a - b);
@@ -997,6 +1080,7 @@ export default function PdfEditor() {
         signal: controller.signal,
       });
       setPngImages(images);
+      setRedactionFailure(null);
       if (imageExportOptions.zip && images.length > 1) {
         const extension = imageExportOptions.format === 'jpeg' ? 'jpg' : imageExportOptions.format;
         const zipName = sanitizeFilename(imageExportOptions.filename, 'edited-pages');
@@ -1015,12 +1099,31 @@ export default function PdfEditor() {
       console.error(err);
       if (err instanceof DOMException && err.name === 'AbortError') {
         setOutputMessage('画像出力をキャンセルしました');
-      } else if (!(err instanceof RedactionVerificationError)) {
+      } else if (err instanceof RedactionVerificationError) {
+        setRedactionFailure({ error: err, operation: 'export-images' });
+      } else {
         setOutputError('画像出力中にエラーが発生しました: ' + (err instanceof Error ? err.message : '不明なエラー'));
       }
     } finally {
       setIsExportingPng(false);
       exportAbortRef.current = null;
+    }
+  };
+
+  const retryRedactionFailureWithCover = async () => {
+    if (!redactionFailure) return;
+    switch (redactionFailure.operation) {
+      case 'extract-range':
+        await handleExtract(true);
+        break;
+      case 'extract-selected':
+        await handleExtractSelected(true);
+        break;
+      case 'export-images':
+        await handleExportPng(true);
+        break;
+      default:
+        await handleSavePdf(true);
     }
   };
 
@@ -1245,8 +1348,8 @@ export default function PdfEditor() {
         onResetPageChanges={resetPageChanges}
         onExtractStartChange={setExtractStart}
         onExtractEndChange={setExtractEnd}
-        onExtract={handleExtract}
-        onExtractSelected={handleExtractSelected}
+        onExtract={() => void handleExtract()}
+        onExtractSelected={() => void handleExtractSelected()}
         onDragStart={handleDragStart}
         onDragOver={handleDragOver}
         onDragEnd={handleDragEnd}
@@ -1276,7 +1379,7 @@ export default function PdfEditor() {
           onRemoveContentEdit={removeContentEdit}
           onSelectContentItem={setSelectedContentId}
           onSavePdf={() => void handleSavePdf()}
-          onExportPng={handleExportPng}
+          onExportPng={() => void handleExportPng()}
           isSavingPdf={isSavingPdf}
           isExportingPng={isExportingPng}
           imageExportOptions={imageExportOptions}
@@ -1349,13 +1452,13 @@ export default function PdfEditor() {
               <button type="button" onClick={() => setRedactionFailure(null)} aria-label="閉じる" className="rounded p-1 hover:bg-gray-100"><X className="h-5 w-5" /></button>
             </div>
             <ul className="mt-4 max-h-52 space-y-2 overflow-auto rounded-lg bg-red-50 p-3 text-sm text-red-800">
-              {redactionFailure.residual.map((item) => (
+              {redactionFailure.error.residual.map((item) => (
                 <li key={item.id}>ページ {item.pageIndex + 1}: 「{item.text}」</li>
               ))}
             </ul>
             <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
               <button type="button" onClick={() => { setRedactionFailure(null); setActiveSubTab('content'); }} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">編集へ戻る</button>
-              <button type="button" onClick={() => void handleSavePdf(true)} disabled={isSavingPdf} className="rounded-lg bg-red-700 px-4 py-2 text-sm font-medium text-white hover:bg-red-800 disabled:opacity-50">リスクを理解してカバーのみで保存</button>
+              <button type="button" onClick={() => void retryRedactionFailureWithCover()} disabled={isSavingPdf || isExportingPng} className="rounded-lg bg-red-700 px-4 py-2 text-sm font-medium text-white hover:bg-red-800 disabled:opacity-50">リスクを理解してカバーのみで再試行</button>
             </div>
             <p className="mt-3 text-xs text-gray-500">カバーのみの保存では、コピー、検索、AIによる抽出などで元の文字が取得される場合があります。</p>
           </div>

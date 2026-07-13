@@ -1,6 +1,79 @@
 import { PDFDocument, degrees } from 'pdf-lib';
-import type { PagePlanEntry } from '../types/pdfEdit';
+import type { ContentEdit } from '../types/contentEdit';
+import type { PagePlanEntry, TextBoxConfig } from '../types/pdfEdit';
+import { downloadBlob } from './download';
 import { saveReachablePdfDocument } from './pdfSerialization';
+
+export function copyPdfBytes(pdfBytes: ArrayBuffer | Uint8Array): Uint8Array {
+  return pdfBytes instanceof Uint8Array
+    ? pdfBytes.slice()
+    : new Uint8Array(pdfBytes.slice(0));
+}
+
+export function getUnrotatedPageSize(
+  pageSize: { width: number; height: number },
+  rotation: PagePlanEntry['rotation'],
+) {
+  return rotation === 90 || rotation === 270
+    ? { width: pageSize.height, height: pageSize.width }
+    : pageSize;
+}
+
+export function duplicatePagePlanSelection(
+  entries: PagePlanEntry[],
+  selectedPages: Set<number>,
+  textBoxes: TextBoxConfig[],
+  contentEdits: ContentEdit[],
+  createId: () => string = () => crypto.randomUUID(),
+) {
+  const duplicateIds = new Map<string, string>();
+  const nextEntries = entries.flatMap((entry, index) => {
+    if (!selectedPages.has(index)) return [entry];
+    const duplicateId = createId();
+    duplicateIds.set(entry.id, duplicateId);
+    return [entry, { ...entry, id: duplicateId }];
+  });
+  const nextIndexById = new Map(nextEntries.map((entry, index) => [entry.id, index]));
+
+  const nextTextBoxes = textBoxes.flatMap((box) => {
+    if (box.pageIndex === -1) return [box];
+    const sourceEntry = entries[box.pageIndex];
+    if (!sourceEntry) return [];
+    const originalIndex = nextIndexById.get(sourceEntry.id);
+    if (originalIndex === undefined) return [];
+
+    const remapped = { ...box, pageIndex: originalIndex };
+    const duplicateId = duplicateIds.get(sourceEntry.id);
+    if (!duplicateId) return [remapped];
+    return [
+      remapped,
+      { ...box, id: createId(), pageIndex: nextIndexById.get(duplicateId)! },
+    ];
+  });
+
+  const nextContentEdits = contentEdits.flatMap((edit) => {
+    let sourceEntry: PagePlanEntry | undefined;
+    if (edit.pageEntryId) {
+      sourceEntry = entries.find((entry) => entry.id === edit.pageEntryId);
+    } else {
+      sourceEntry = entries.find((entry, index) =>
+        selectedPages.has(index) && entry.sourcePageIndex === edit.target.pageIndex,
+      );
+    }
+    const duplicateId = sourceEntry ? duplicateIds.get(sourceEntry.id) : undefined;
+    if (!duplicateId) return [edit];
+    return [
+      edit,
+      {
+        ...edit,
+        pageEntryId: duplicateId,
+        target: { ...edit.target },
+      } as ContentEdit,
+    ];
+  });
+
+  return { pageEntries: nextEntries, textBoxes: nextTextBoxes, contentEdits: nextContentEdits };
+}
 
 export async function deletePdfPages(
   pdfBytes: ArrayBuffer | Uint8Array,
@@ -70,7 +143,8 @@ export async function buildPdfFromPagePlan(
       [page] = await nextDoc.copyPages(copySource, [entry.sourcePageIndex]);
     }
     const originalRotation = page.getRotation().angle;
-    page.setRotation(degrees((originalRotation + entry.rotation) % 360));
+    const rotation = ((originalRotation + entry.rotation) % 360 + 360) % 360;
+    page.setRotation(degrees(rotation));
     nextDoc.addPage(page);
   }
 
@@ -123,10 +197,5 @@ export async function extractPdfPages(
 
 export function downloadPdf(pdfBytes: Uint8Array, filename: string) {
   const blob = new Blob([new Uint8Array(pdfBytes)], { type: 'application/pdf' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, filename);
 }

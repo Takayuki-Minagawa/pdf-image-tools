@@ -30,6 +30,7 @@ import {
   sortImageFiles,
 } from '../utils/imagesToPdf';
 import { sendPdfToEditor } from '../utils/workflowHandoff';
+import { downloadBlob } from '../utils/download';
 import type {
   ImageAdjustments,
   ImageFile,
@@ -161,15 +162,8 @@ export default function ImageToPdfConverter() {
     try {
       const pdfBlob = await imagesToPdf(images, setProgress, options);
       setLastPdfBlob(pdfBlob);
-      const url = URL.createObjectURL(pdfBlob);
-      const link = document.createElement('a');
       const fileName = normalizePdfFileName(outputName);
-      link.href = url;
-      link.download = fileName;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      downloadBlob(pdfBlob, fileName);
       setNotice(`${fileName} を作成しました`);
     } catch (conversionError) {
       setError('PDFの作成中にエラーが発生しました。画像や設定を確認して再試行してください。');

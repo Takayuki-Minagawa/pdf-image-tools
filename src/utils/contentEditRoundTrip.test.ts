@@ -7,7 +7,8 @@
  *
  * pdf.js は Node では legacy ビルドが必要（vite.config.ts の test.alias 参照）。
  */
-import { describe, expect, it } from 'vitest';
+import { readFile } from 'node:fs/promises';
+import { describe, expect, it, vi } from 'vitest';
 import {
   PDFDocument,
   PDFRawStream,
@@ -88,6 +89,38 @@ describe('完全削除（redact）— applyContentEdits 経由の統合', () => 
 
     expect(after).not.toContain('BUILDING-NAME');
     expect(after).toContain('ROOM-101');
+  });
+
+  it('embeds replacement font data before reachable-only redaction serialization', async () => {
+    const fontBytes = await readFile(new URL('../../public/fonts/NotoSansJP.ttf', import.meta.url));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(new Uint8Array(fontBytes)),
+    );
+    try {
+      const bytes = await createTextPdf();
+      const items = await recognizeFirstPage(bytes);
+      const redactTarget = items.find(
+        (item): item is RecognizedTextItem => item.kind === 'text' && item.text === 'BUILDING-NAME',
+      );
+      const replaceTarget = items.find(
+        (item): item is RecognizedTextItem => item.kind === 'text' && item.text === 'ROOM-101',
+      );
+      expect(redactTarget).toBeDefined();
+      expect(replaceTarget).toBeDefined();
+
+      const replacement = createTextEdit(replaceTarget!);
+      replacement.newText = 'ROOM-202';
+      const output = await applyContentEdits(bytes, [
+        { ...createTextEdit(redactTarget!), action: 'redact' },
+        replacement,
+      ]);
+      const after = await extractStrings(output);
+
+      expect(after).not.toContain('BUILDING-NAME');
+      expect(after).toContain('ROOM-202');
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it('差し替え前の孤児コンテンツストリームも保存ファイルから除去する', async () => {

@@ -13,6 +13,10 @@ export function consumePendingPdf() {
   return file;
 }
 
+export function peekPendingPdf() {
+  return pendingFile;
+}
+
 export function subscribePdfEditorHandoff(callback: () => void) {
   window.addEventListener(OPEN_EDITOR_EVENT, callback);
   return () => window.removeEventListener(OPEN_EDITOR_EVENT, callback);
