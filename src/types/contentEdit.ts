@@ -50,6 +50,8 @@ export type RecognizedItem = RecognizedTextItem | RecognizedPathItem;
 
 export interface TextContentEdit {
   kind: 'text';
+  /** 同じ元ページを複製した場合に、編集対象となる表示ページを識別する。 */
+  pageEntryId?: string;
   target: RecognizedTextItem;
   // delete: 元の文字をカバー色で隠す（見た目のみ。文字データは残る）
   // redact: 文字描画をコンテンツストリームから物理削除（AIのテキスト抽出からも消える）＋カバー
@@ -62,6 +64,7 @@ export interface TextContentEdit {
 
 export interface PathContentEdit {
   kind: 'path';
+  pageEntryId?: string;
   target: RecognizedPathItem;
   action: 'restyle' | 'delete';
   strokeColor: string;

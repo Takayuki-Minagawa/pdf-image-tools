@@ -11,6 +11,19 @@ import { loadFontBytes } from './fontLoader';
 import { redactTextFromPage } from './contentStreamRedaction';
 import { findResidualRedactions } from './redactionVerification';
 import type { RecognizedTextItem } from '../types/contentEdit';
+import { saveReachablePdfDocument } from './pdfSerialization';
+
+export class RedactionVerificationError extends Error {
+  readonly residual: RecognizedTextItem[];
+  readonly coveredPdfBytes: Uint8Array;
+
+  constructor(residual: RecognizedTextItem[], coveredPdfBytes: Uint8Array) {
+    super(`${residual.length}件の文字データを完全削除できませんでした`);
+    this.name = 'RedactionVerificationError';
+    this.residual = residual;
+    this.coveredPdfBytes = coveredPdfBytes;
+  }
+}
 
 // テキストのカバー矩形: ベースラインからディセンダー分を下に、文字高+αを上に確保
 export const TEXT_COVER_DESCENT_RATIO = 0.25;
@@ -120,6 +133,7 @@ export async function applyContentEdits(
   pdfBytes: ArrayBuffer | Uint8Array,
   edits: ContentEdit[],
   onWarn?: (unmatched: RecognizedTextItem[]) => void,
+  options: { failOnResidual?: boolean } = {},
 ): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.load(pdfBytes);
 
@@ -149,13 +163,14 @@ export async function applyContentEdits(
     }
   }
 
-  const bytes = await pdfDoc.save();
-
   // 完全削除は事後検証する: 対象文字が抽出可能なまま残っていれば「保証できなかった」
   // として通知する（マッチング任せにせず実測で確認する）。
   const redactTargets = edits
     .filter((e): e is typeof e & { kind: 'text' } => e.kind === 'text' && e.action === 'redact')
     .map((e) => e.target);
+  const bytes = redactTargets.length > 0
+    ? await saveReachablePdfDocument(pdfDoc)
+    : await pdfDoc.save();
   if (redactTargets.length > 0) {
     const residual = await findResidualRedactions(bytes, redactTargets);
     if (residual.length > 0) {
@@ -164,6 +179,9 @@ export async function applyContentEdits(
         residual.map((t) => t.text),
       );
       onWarn?.(residual);
+      if (options.failOnResidual) {
+        throw new RedactionVerificationError(residual, bytes);
+      }
     }
   }
 

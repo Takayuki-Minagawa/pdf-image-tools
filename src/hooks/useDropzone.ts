@@ -1,63 +1,115 @@
 import { useCallback, useState } from 'react';
 
-interface UseDropzoneProps {
-  accept?: string[];
-  onDrop: (files: File[]) => void;
+export type FileRejectionReason = 'file-type';
+
+export interface FileRejection {
+  file: File;
+  reason: FileRejectionReason;
+  message: string;
 }
 
-export function useDropzone({ accept, onDrop }: UseDropzoneProps) {
+export interface UseDropzoneProps {
+  accept?: string[];
+  onDrop: (files: File[]) => void;
+  onReject?: (rejections: FileRejection[]) => void;
+  disabled?: boolean;
+}
+
+function matchesAcceptedType(file: File, acceptedTypes: string[]): boolean {
+  return acceptedTypes.some((acceptedType) => {
+    const normalizedType = acceptedType.trim().toLowerCase();
+    if (!normalizedType) return false;
+
+    if (normalizedType.startsWith('.')) {
+      return file.name.toLowerCase().endsWith(normalizedType);
+    }
+
+    if (normalizedType.endsWith('/*')) {
+      return file.type.toLowerCase().startsWith(normalizedType.slice(0, -1));
+    }
+
+    return file.type.toLowerCase() === normalizedType;
+  });
+}
+
+function rejectionMessage(file: File, acceptedTypes: string[]): string {
+  return `${file.name} は対応していない形式です。対応形式: ${acceptedTypes.join(', ')}`;
+}
+
+export function useDropzone({ accept, onDrop, onReject, disabled = false }: UseDropzoneProps) {
   const [isDragging, setIsDragging] = useState(false);
+  const [rejections, setRejections] = useState<FileRejection[]>([]);
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  }, []);
+  const processFiles = useCallback(
+    (files: File[]) => {
+      if (disabled || files.length === 0) return;
 
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+      const acceptedFiles: File[] = [];
+      const rejectedFiles: FileRejection[] = [];
+
+      files.forEach((file) => {
+        if (!accept || accept.length === 0 || matchesAcceptedType(file, accept)) {
+          acceptedFiles.push(file);
+        } else {
+          rejectedFiles.push({
+            file,
+            reason: 'file-type',
+            message: rejectionMessage(file, accept),
+          });
+        }
+      });
+
+      setRejections(rejectedFiles);
+      if (rejectedFiles.length > 0) onReject?.(rejectedFiles);
+      if (acceptedFiles.length > 0) onDrop(acceptedFiles);
+    },
+    [accept, disabled, onDrop, onReject],
+  );
+
+  const handleDragOver = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (disabled) return;
+      event.dataTransfer.dropEffect = 'copy';
+      setIsDragging(true);
+    },
+    [disabled],
+  );
+
+  const handleDragLeave = useCallback((event: React.DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
     setIsDragging(false);
   }, []);
 
   const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
+    (event: React.DragEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
       setIsDragging(false);
-
-      const files = Array.from(e.dataTransfer.files);
-      const filteredFiles = accept
-        ? files.filter((file) =>
-            accept.some((type) => {
-              if (type.startsWith('.')) {
-                return file.name.toLowerCase().endsWith(type.toLowerCase());
-              }
-              return file.type.match(type);
-            })
-          )
-        : files;
-
-      if (filteredFiles.length > 0) {
-        onDrop(filteredFiles);
-      }
+      processFiles(Array.from(event.dataTransfer.files));
     },
-    [accept, onDrop]
+    [processFiles],
   );
 
   const handleFileSelect = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const files = e.target.files ? Array.from(e.target.files) : [];
-      if (files.length > 0) {
-        onDrop(files);
-      }
-      e.target.value = '';
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      processFiles(event.target.files ? Array.from(event.target.files) : []);
+      event.target.value = '';
     },
-    [onDrop]
+    [processFiles],
   );
+
+  const clearRejections = useCallback(() => setRejections([]), []);
 
   return {
     isDragging,
+    rejections,
+    clearRejections,
     handleDragOver,
     handleDragLeave,
     handleDrop,
