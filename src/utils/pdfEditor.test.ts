@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { PDFDocument, degrees } from 'pdf-lib';
+import { PDFDocument, PDFName, degrees } from 'pdf-lib';
 import {
   buildPdfFromPagePlan,
   copyPdfBytes,
+  deletePdfPages,
   duplicatePagePlanSelection,
   extractPdfPageIndices,
   getUnrotatedPageSize,
+  reorderPdfPages,
 } from './pdfEditor';
 import { sanitizeFilename } from './download';
 import { visualPointToPdf } from './pdfEditOperations';
@@ -37,6 +39,7 @@ describe('buildPdfFromPagePlan', () => {
     expect(result.getPage(2).getRotation().angle).toBe(180);
     expect(result.getPage(3).getSize()).toEqual({ width: 612, height: 792 });
     expect(result.getTitle()).toBe('Page plan test');
+    expect(result.getPages().every((page) => page.node.has(PDFName.of('Parent')))).toBe(true);
   });
 
   it('does not allow an empty PDF', async () => {
@@ -72,6 +75,28 @@ describe('buildPdfFromPagePlan', () => {
     const result = await PDFDocument.load(output);
 
     expect(result.getForm().getFields().map((field) => field.getName())).toEqual(['kept']);
+  });
+
+  it('keeps page tree parents when reordering through the legacy API', async () => {
+    const output = await reorderPdfPages(await createSourcePdf(), [1, 0]);
+    const result = await PDFDocument.load(output);
+
+    expect(result.getPageCount()).toBe(2);
+    expect(result.getPages().every((page) => page.node.has(PDFName.of('Parent')))).toBe(true);
+  });
+
+  it('cleans up form fields on pages removed through the delete API', async () => {
+    const document = await PDFDocument.create();
+    const keptPage = document.addPage([200, 300]);
+    const removedPage = document.addPage([200, 300]);
+    const form = document.getForm();
+    form.createTextField('kept').addToPage(keptPage, { x: 10, y: 10, width: 80, height: 20 });
+    form.createTextField('removed').addToPage(removedPage, { x: 10, y: 10, width: 80, height: 20 });
+
+    const result = await PDFDocument.load(await deletePdfPages(await document.save(), [1]));
+
+    expect(result.getForm().getFields().map((field) => field.getName())).toEqual(['kept']);
+    expect(result.getPages().every((page) => page.node.has(PDFName.of('Parent')))).toBe(true);
   });
 });
 

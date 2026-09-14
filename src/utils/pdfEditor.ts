@@ -88,22 +88,21 @@ export async function deletePdfPages(
     pdfDoc.removePage(index);
   }
   
-  return pdfDoc.save();
+  return saveReachablePdfDocument(pdfDoc);
 }
 
 export async function reorderPdfPages(
   pdfBytes: ArrayBuffer | Uint8Array,
   newOrder: number[]
 ): Promise<Uint8Array> {
-  const srcDoc = await PDFDocument.load(pdfBytes);
-  const newDoc = await PDFDocument.create();
-  
-  for (const pageIndex of newOrder) {
-    const [copiedPage] = await newDoc.copyPages(srcDoc, [pageIndex]);
-    newDoc.addPage(copiedPage);
-  }
-  
-  return newDoc.save();
+  return buildPdfFromPagePlan(
+    pdfBytes,
+    newOrder.map((sourcePageIndex, index) => ({
+      id: `reordered-${index}`,
+      sourcePageIndex,
+      rotation: 0,
+    })),
+  );
 }
 
 /**
