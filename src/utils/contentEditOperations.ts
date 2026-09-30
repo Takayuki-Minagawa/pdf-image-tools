@@ -1,5 +1,5 @@
 import { PDFDocument, type PDFFont, type PDFPage } from 'pdf-lib';
-import fontkit from '@pdf-lib/fontkit';
+import { pdfFontkit } from './pdfFontkit';
 import type {
   ContentEdit,
   PagePoint,
@@ -142,7 +142,7 @@ export async function applyContentEdits(
     (edit) => edit.kind === 'text' && edit.action === 'replace' && edit.newText,
   );
   if (needsFont) {
-    pdfDoc.registerFontkit(fontkit);
+    pdfDoc.registerFontkit(pdfFontkit);
     font = await pdfDoc.embedFont(await loadFontBytes(), { subset: true });
   }
 

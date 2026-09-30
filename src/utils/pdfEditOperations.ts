@@ -1,5 +1,5 @@
 import { PDFDocument, degrees, rgb, PDFFont, type PDFPage } from 'pdf-lib';
-import fontkit from '@pdf-lib/fontkit';
+import { pdfFontkit } from './pdfFontkit';
 import type {
   TextBoxConfig,
   HeaderFooterSettings,
@@ -362,7 +362,7 @@ export async function applyPdfEdits(
   fileName: string,
 ): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.load(pdfBytes);
-  pdfDoc.registerFontkit(fontkit);
+  pdfDoc.registerFontkit(pdfFontkit);
   const fontBytes = await loadFontBytes();
   const font = await pdfDoc.embedFont(fontBytes, { subset: true });
 

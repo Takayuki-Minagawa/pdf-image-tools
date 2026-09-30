@@ -145,7 +145,13 @@ async function applyRecipe(input, output, recipePath) {
     throw new Error('The JSON file is not a PDF Image Tools recipe');
   }
   const document = await PDFDocument.load(await readFile(input));
-  document.registerFontkit(fontkit);
+  document.registerFontkit({
+    create(bytes) {
+      const font = fontkit.create(bytes);
+      // Instantiate variable outlines before subsetting (see src/utils/pdfFontkit.ts).
+      return font.variationAxes?.wght ? font.getVariation({ wght: 400 }) : font;
+    },
+  });
   const font = await document.embedFont(await readFile(new URL('../public/fonts/NotoSansJP.ttf', import.meta.url)), { subset: true });
   const pages = document.getPages();
 

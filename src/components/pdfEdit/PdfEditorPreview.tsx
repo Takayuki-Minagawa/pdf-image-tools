@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
-import type { KeyboardEvent, MouseEvent, RefObject } from 'react';
+import type { KeyboardEvent, MouseEvent, ReactNode, RefObject } from 'react';
 
 interface PdfEditorPreviewProps {
   currentPage: number;
@@ -21,9 +21,10 @@ interface PdfEditorPreviewProps {
   isTextPlacementActive: boolean;
   isContentSelectionActive: boolean;
   pageSize: { width: number; height: number };
+  graphicsOverlay?: ReactNode;
 }
 
-const SCALE_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+const SCALE_OPTIONS = Array.from({ length: 12 }, (_, index) => (index + 1) / 4);
 
 export function PdfEditorPreview({
   currentPage,
@@ -45,6 +46,7 @@ export function PdfEditorPreview({
   isTextPlacementActive,
   isContentSelectionActive,
   pageSize,
+  graphicsOverlay,
 }: PdfEditorPreviewProps) {
   return (
     <div className="min-w-0 flex-1 space-y-3">
@@ -122,7 +124,7 @@ export function PdfEditorPreview({
         aria-label={`PDFプレビュー ${currentPage}/${displayPageCount}ページ`}
         className="max-h-[600px] overflow-auto rounded-lg bg-gray-200 p-4"
       >
-        <div className="flex justify-center">
+        <div className="flex min-w-fit justify-center">
           <div className="relative inline-block">
             <canvas ref={canvasRef} className="bg-white shadow-lg" aria-label={`${currentPage}ページ目の内容`} />
             <canvas
@@ -137,6 +139,7 @@ export function PdfEditorPreview({
                     : 'pointer-events-none'
               }`}
             />
+            {graphicsOverlay}
           </div>
         </div>
       </div>
