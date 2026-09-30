@@ -1,3 +1,4 @@
+import type { PdfGraphic, WatermarkConfig } from '../types/pdfGraphics';
 import type {
   HeaderFooterSettings,
   PageNumberingConfig,
@@ -19,6 +20,8 @@ export interface PdfEditorDraftSnapshot {
   headerFooter: HeaderFooterSettings;
   pageNumbering: PageNumberingConfig;
   contentEdits: ContentEdit[];
+  graphics?: PdfGraphic[];
+  watermark?: WatermarkConfig;
 }
 
 export interface StoredPdfDraft {
@@ -30,7 +33,7 @@ export interface StoredPdfDraft {
   snapshot: PdfEditorDraftSnapshot;
   currentPage: number;
   scale: number;
-  activeSubTab: 'content' | 'textbox' | 'header-footer' | 'page-number';
+  activeSubTab: 'content' | 'textbox' | 'header-footer' | 'page-number' | 'graphics' | 'watermark';
   imageExportOptions: PdfImageExportOptions;
   savedAt: number;
 }

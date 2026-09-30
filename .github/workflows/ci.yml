@@ -1,10 +1,8 @@
 name: CI
 
+# Run checks locally; reserve hosted Actions usage for Pages publishing.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   lint-and-typecheck:

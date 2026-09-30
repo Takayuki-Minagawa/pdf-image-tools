@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'pdf-image-tools';
-const CACHE_NAME = `${CACHE_PREFIX}-2026-07-13-1`;
+const CACHE_NAME = `${CACHE_PREFIX}-2026-09-30-1`;
 const APP_ROOT = self.registration.scope;
 const APP_SHELL = [
   APP_ROOT,

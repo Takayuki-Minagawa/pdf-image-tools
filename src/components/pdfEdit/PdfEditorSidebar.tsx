@@ -1,17 +1,29 @@
-import { BookOpen, Hash, Image as ImageIcon, Save, Shapes, Type } from 'lucide-react';
+import { BookOpen, Hash, Image as ImageIcon, Save, Shapes, Type, Stamp } from 'lucide-react';
 import { TextBoxEditor } from './TextBoxEditor';
 import { HeaderFooterEditor } from './HeaderFooterEditor';
 import { PageNumberEditor } from './PageNumberEditor';
 import { ContentEditPanel } from './ContentEditPanel';
 import { ImageExportSettings } from './ImageExportSettings';
 import { RecipeManager } from './RecipeManager';
+import { GraphicsEditor } from './GraphicsEditor';
+import { WatermarkEditor } from './WatermarkEditor';
+import type { PdfGraphic, WatermarkConfig } from '../../types/pdfGraphics';
 import type { TextBoxConfig, HeaderFooterSettings, PageNumberingConfig, PdfImageExportOptions } from '../../types/pdfEdit';
 import type { PdfEditRecipe } from '../../utils/recipeStorage';
 import type { ContentEdit, RecognizedItem } from '../../types/contentEdit';
 
-export type EditorSubTab = 'content' | 'textbox' | 'header-footer' | 'page-number';
+export type EditorSubTab = 'content' | 'textbox' | 'header-footer' | 'page-number' | 'graphics' | 'watermark';
 
 interface PdfEditorSidebarProps {
+  documentKey: string;
+  graphics: PdfGraphic[];
+  onGraphicsChange: (graphics: PdfGraphic[]) => void;
+  activeGraphicId: string | null;
+  onActiveGraphicChange: (id: string | null) => void;
+  watermark: WatermarkConfig;
+  onWatermarkChange: (config: WatermarkConfig) => void;
+  currentPageIndex: number;
+  pageSize: { width: number; height: number };
   activeSubTab: EditorSubTab;
   onActiveSubTabChange: (subTab: EditorSubTab) => void;
   textBoxes: TextBoxConfig[];
@@ -42,6 +54,8 @@ interface PdfEditorSidebarProps {
 }
 
 const SUB_TABS: { key: EditorSubTab; label: string; icon: typeof Type }[] = [
+  { key: 'graphics', label: '画像・図形・署名', icon: ImageIcon },
+  { key: 'watermark', label: '透かし', icon: Stamp },
   { key: 'content', label: 'コンテンツ編集', icon: Shapes },
   { key: 'textbox', label: 'テキストボックス', icon: Type },
   { key: 'header-footer', label: 'ヘッダー/フッター', icon: BookOpen },
@@ -49,6 +63,15 @@ const SUB_TABS: { key: EditorSubTab; label: string; icon: typeof Type }[] = [
 ];
 
 export function PdfEditorSidebar({
+  documentKey,
+  graphics,
+  onGraphicsChange,
+  activeGraphicId,
+  onActiveGraphicChange,
+  watermark,
+  onWatermarkChange,
+  currentPageIndex,
+  pageSize,
   activeSubTab,
   onActiveSubTabChange,
   textBoxes,
@@ -79,27 +102,44 @@ export function PdfEditorSidebar({
 }: PdfEditorSidebarProps) {
   return (
     <div className="shrink-0 space-y-3 lg:w-80">
-      <div className="flex overflow-hidden rounded-lg border border-gray-200">
+      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-gray-200 bg-gray-200">
         {SUB_TABS.map((tab) => {
           const Icon = tab.icon;
           return (
             <button
               key={tab.key}
+              type="button"
+              aria-pressed={activeSubTab === tab.key}
               onClick={() => onActiveSubTabChange(tab.key)}
               className={`flex flex-1 items-center justify-center gap-1 px-2 py-2.5 text-xs font-medium transition-colors ${
                 activeSubTab === tab.key
                   ? 'bg-amber-500 text-white'
-                  : 'text-gray-600 hover:bg-gray-50'
+                  : 'bg-white text-gray-600 hover:bg-gray-50'
               }`}
             >
               <Icon className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">{tab.label}</span>
+              <span>{tab.label}</span>
             </button>
           );
         })}
       </div>
 
       <div className="max-h-[500px] overflow-auto rounded-lg border border-gray-200 p-3">
+        {activeSubTab === 'graphics' && (
+          <GraphicsEditor
+            key={documentKey}
+            graphics={graphics}
+            onChange={onGraphicsChange}
+            activeGraphicId={activeGraphicId}
+            onActiveChange={onActiveGraphicChange}
+            currentPageIndex={currentPageIndex}
+            totalPages={totalPages}
+            pageSize={pageSize}
+          />
+        )}
+        {activeSubTab === 'watermark' && (
+          <WatermarkEditor config={watermark} onChange={onWatermarkChange} currentPageIndex={currentPageIndex} totalPages={totalPages} />
+        )}
         {activeSubTab === 'content' && (
           <ContentEditPanel
             isRecognizing={isRecognizing}

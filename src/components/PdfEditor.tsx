@@ -18,6 +18,10 @@ import { ProgressBar } from './ProgressBar';
 import { PageManagementPanel } from './pdfEdit/PageManagementPanel';
 import { PdfEditorSidebar, type EditorSubTab } from './pdfEdit/PdfEditorSidebar';
 import { PdfEditorPreview } from './pdfEdit/PdfEditorPreview';
+import { GraphicsOverlay } from './pdfEdit/GraphicsOverlay';
+import { PdfTextSearch } from './pdfEdit/PdfTextSearch';
+import { DEFAULT_WATERMARK, type PdfGraphic, type WatermarkConfig } from '../types/pdfGraphics';
+import { applyPdfGraphics, remapGraphicsForPages, duplicateGraphicsForPages } from '../utils/pdfGraphics';
 import { applyPdfEdits } from '../utils/pdfEditOperations';
 import {
   buildPdfFromPagePlan,
@@ -137,6 +141,9 @@ export default function PdfEditor() {
   const [headerFooter, setHeaderFooter] = useState<HeaderFooterSettings>(DEFAULT_HEADER_FOOTER);
   const [pageNumbering, setPageNumbering] = useState<PageNumberingConfig>(DEFAULT_PAGE_NUMBERING);
   const [activeTextBoxId, setActiveTextBoxId] = useState<string | null>(null);
+  const [graphics, setGraphics] = useState<PdfGraphic[]>([]);
+  const [watermark, setWatermark] = useState<WatermarkConfig>(DEFAULT_WATERMARK);
+  const [activeGraphicId, setActiveGraphicId] = useState<string | null>(null);
 
   const [contentEdits, setContentEdits] = useState<ContentEdit[]>([]);
   const [recognizedByPage, setRecognizedByPage] = useState<Map<number, RecognizedItem[]>>(
@@ -221,7 +228,9 @@ export default function PdfEditor() {
     headerFooter,
     pageNumbering,
     contentEdits,
-  }), [contentEdits, headerFooter, pageEntries, pageNumbering, textBoxes]);
+    graphics,
+    watermark,
+  }), [contentEdits, graphics, watermark, headerFooter, pageEntries, pageNumbering, textBoxes]);
 
   const restoreSnapshot = useCallback((snapshot: PdfEditorDraftSnapshot) => {
     setPageEntries(snapshot.pageEntries);
@@ -230,6 +239,9 @@ export default function PdfEditor() {
     setHeaderFooter(snapshot.headerFooter);
     setPageNumbering(snapshot.pageNumbering);
     setContentEdits(snapshot.contentEdits);
+    setGraphics(snapshot.graphics ?? []);
+    setWatermark(snapshot.watermark ?? DEFAULT_WATERMARK);
+    setActiveGraphicId(null);
     setSelectedPages(new Set());
     setSelectedContentId(null);
   }, []);
@@ -277,6 +289,9 @@ export default function PdfEditor() {
     setHeaderFooter(pendingDraft?.snapshot.headerFooter ?? DEFAULT_HEADER_FOOTER);
     setPageNumbering(pendingDraft?.snapshot.pageNumbering ?? DEFAULT_PAGE_NUMBERING);
     setContentEdits(pendingDraft?.snapshot.contentEdits ?? []);
+    setGraphics(pendingDraft?.snapshot.graphics ?? []);
+    setWatermark(pendingDraft?.snapshot.watermark ?? DEFAULT_WATERMARK);
+    setActiveGraphicId(null);
     if (pendingDraft) setImageExportOptions(pendingDraft.imageExportOptions);
     setRecognizedByPage(new Map());
     setSelectedContentId(null);
@@ -287,6 +302,8 @@ export default function PdfEditor() {
       headerFooter: pendingDraft?.snapshot.headerFooter ?? DEFAULT_HEADER_FOOTER,
       pageNumbering: pendingDraft?.snapshot.pageNumbering ?? DEFAULT_PAGE_NUMBERING,
       contentEdits: pendingDraft?.snapshot.contentEdits ?? [],
+      graphics: pendingDraft?.snapshot.graphics ?? [],
+      watermark: pendingDraft?.snapshot.watermark ?? DEFAULT_WATERMARK,
     };
     resetHistory(initialSnapshot);
     savedSignatureRef.current = JSON.stringify(initialSnapshot);
@@ -653,6 +670,9 @@ export default function PdfEditor() {
     setPageNumbering(DEFAULT_PAGE_NUMBERING);
     setActiveTextBoxId(null);
     setContentEdits([]);
+    setGraphics([]);
+    setWatermark(DEFAULT_WATERMARK);
+    setActiveGraphicId(null);
     setRecognizedByPage(new Map());
     setSelectedContentId(null);
     setPngImages([]);
@@ -694,6 +714,9 @@ export default function PdfEditor() {
     setPageNumbering(DEFAULT_PAGE_NUMBERING);
     setActiveTextBoxId(null);
     setContentEdits([]);
+    setGraphics([]);
+    setWatermark(DEFAULT_WATERMARK);
+    setActiveGraphicId(null);
     setRecognizedByPage(new Map());
     setSelectedContentId(null);
     setPngImages([]);
@@ -753,6 +776,15 @@ export default function PdfEditor() {
         }
 
         return nextTextBoxes;
+      });
+      setGraphics((current) => remapGraphicsForPages(current, previousEntries, nextEntries));
+      setWatermark((current) => {
+        if (current.pageIndex === -1) return current;
+        const entryId = previousEntries[current.pageIndex]?.id;
+        const nextPageIndex = nextEntries.findIndex((entry) => entry.id === entryId);
+        return nextPageIndex < 0
+          ? { ...current, enabled: false, pageIndex: -1 }
+          : { ...current, pageIndex: nextPageIndex };
       });
       const retainedEntryIds = new Set(nextEntries.map((entry) => entry.id));
       setContentEdits((current) => current.filter((edit) =>
@@ -831,6 +863,12 @@ export default function PdfEditor() {
     pageEntriesRef.current = duplicated.pageEntries;
     setPageEntries(duplicated.pageEntries);
     setTextBoxes(duplicated.textBoxes);
+    setGraphics(duplicateGraphicsForPages(graphics, pageEntries, duplicated.pageEntries));
+    if (watermark.pageIndex >= 0) {
+      const watermarkPageId = pageEntries[watermark.pageIndex]?.id;
+      const pageIndex = duplicated.pageEntries.findIndex((entry) => entry.id === watermarkPageId);
+      setWatermark({ ...watermark, pageIndex });
+    }
     setContentEdits(duplicated.contentEdits);
     setSelectedPages(new Set());
     setPngImages([]);
@@ -942,15 +980,20 @@ export default function PdfEditor() {
     }
 
     if (hasOverlayEdits) {
-      return applyPdfEdits(
+      workingPdf = await applyPdfEdits(
         workingPdf,
         { textBoxes, headerFooter, pageNumbering },
         pdfFile.name,
       );
     }
 
+    if (graphics.length > 0 || watermark.enabled) {
+      workingPdf = await applyPdfGraphics(workingPdf, graphics, watermark);
+    }
     return copyPdfBytes(workingPdf);
   }, [
+    graphics,
+    watermark,
     pdfBytes,
     pdfFile,
     hasOverlayEdits,
@@ -1326,6 +1369,20 @@ export default function PdfEditor() {
         </details>
       </div>
 
+      <PdfTextSearch
+        key={pageEntries[0]?.id ?? 'search'}
+        pdf={pdf}
+        pageEntries={pageEntries}
+        onSelect={(pageIndex, items, selectedId) => {
+          const sourceIndex = pageEntries[pageIndex]?.sourcePageIndex;
+          if (sourceIndex === null || sourceIndex === undefined) return;
+          setRecognizedByPage((previous) => new Map(previous).set(sourceIndex, items));
+          setCurrentPage(pageIndex + 1);
+          setSelectedContentId(selectedId);
+          setActiveSubTab('content');
+        }}
+      />
+
       <PageManagementPanel
         displayPageCount={displayPageCount}
         selectedPages={selectedPages}
@@ -1359,6 +1416,15 @@ export default function PdfEditor() {
 
       <div className="flex flex-col gap-4 lg:flex-row">
         <PdfEditorSidebar
+          documentKey={pageEntries.map((entry) => entry.id).join(',')}
+          graphics={graphics}
+          onGraphicsChange={setGraphics}
+          activeGraphicId={activeGraphicId}
+          onActiveGraphicChange={setActiveGraphicId}
+          watermark={watermark}
+          onWatermarkChange={setWatermark}
+          currentPageIndex={currentPage - 1}
+          pageSize={pageSize}
           activeSubTab={activeSubTab}
           onActiveSubTabChange={setActiveSubTab}
           textBoxes={textBoxes}
@@ -1408,6 +1474,24 @@ export default function PdfEditor() {
           isTextPlacementActive={Boolean(activeTextBoxId && activeSubTab === 'textbox')}
           isContentSelectionActive={activeSubTab === 'content'}
           pageSize={pageSize}
+          graphicsOverlay={
+            <GraphicsOverlay
+              key={`${currentPageEntry?.id}-${currentPageEntry?.rotation}-${scale}`}
+              graphics={graphics}
+              watermark={watermark}
+              currentPageIndex={currentPage - 1}
+              pageSize={pageSize}
+              scale={scale}
+              interactive={activeSubTab === 'graphics'}
+              activeGraphicId={activeGraphicId}
+              onActiveChange={setActiveGraphicId}
+              onChange={(graphic) => setGraphics((previous) => previous.map((item) => item.id === graphic.id ? graphic : item))}
+              onDelete={(id) => {
+                setGraphics((previous) => previous.filter((item) => item.id !== id));
+                setActiveGraphicId(null);
+              }}
+            />
+          }
         />
       </div>
 
