@@ -1,3 +1,4 @@
+import { NumericInput } from './NumericInput';
 import type { WatermarkConfig } from '../../types/pdfGraphics';
 
 interface WatermarkEditorProps {
@@ -38,13 +39,7 @@ export function WatermarkEditor({ config, onChange, currentPageIndex, totalPages
             </select>
           </label>
           <div className="grid grid-cols-2 gap-2">
-            <label className="block text-xs font-medium text-gray-600">
-              文字サイズ (pt)
-              <input type="number" min={8} max={200} className={`${inputClass} mt-1`} value={config.fontSize} onChange={(event) => {
-                const value = event.target.valueAsNumber;
-                if (Number.isFinite(value)) update({ fontSize: Math.min(200, Math.max(8, value)) });
-              }} />
-            </label>
+            <NumericInput label="文字サイズ (pt)" min={8} max={200} step={1} value={config.fontSize} onChange={(fontSize) => update({ fontSize })} />
             <label className="block text-xs font-medium text-gray-600">
               文字色
               <input type="color" className="block w-full h-9 mt-1 rounded border border-gray-300" value={config.color} onChange={(event) => update({ color: event.target.value })} />
@@ -54,13 +49,7 @@ export function WatermarkEditor({ config, onChange, currentPageIndex, totalPages
             不透明度: {Math.round(config.opacity * 100)}%
             <input type="range" min={5} max={100} step={1} className="block w-full mt-2 accent-amber-500" value={Math.round(config.opacity * 100)} onChange={(event) => update({ opacity: Number(event.target.value) / 100 })} />
           </label>
-          <label className="block text-xs font-medium text-gray-600">
-            回転角度 (°)
-            <input type="number" min={-180} max={180} className={`${inputClass} mt-1`} value={config.rotation} onChange={(event) => {
-              const value = event.target.valueAsNumber;
-              if (Number.isFinite(value)) update({ rotation: Math.min(180, Math.max(-180, value)) });
-            }} />
-          </label>
+          <NumericInput label="回転角度 (°)" min={-180} max={180} step={1} value={config.rotation} onChange={(rotation) => update({ rotation })} />
         </div>
       )}
     </div>

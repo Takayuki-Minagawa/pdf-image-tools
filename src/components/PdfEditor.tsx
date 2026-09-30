@@ -22,6 +22,7 @@ import { GraphicsOverlay } from './pdfEdit/GraphicsOverlay';
 import { PdfTextSearch } from './pdfEdit/PdfTextSearch';
 import { DEFAULT_WATERMARK, type PdfGraphic, type WatermarkConfig } from '../types/pdfGraphics';
 import { applyPdfGraphics, remapGraphicsForPages, duplicateGraphicsForPages } from '../utils/pdfGraphics';
+import { rotateGraphicsToPagePlan } from '../utils/pageGraphicRotation';
 import { applyPdfEdits } from '../utils/pdfEditOperations';
 import {
   buildPdfFromPagePlan,
@@ -162,6 +163,7 @@ export default function PdfEditor() {
   const [extractEnd, setExtractEnd] = useState('');
 
   const [isSavingPdf, setIsSavingPdf] = useState(false);
+  const [isRotatingPages, setIsRotatingPages] = useState(false);
   const [isExportingPng, setIsExportingPng] = useState(false);
   const [pngProgress, setPngProgress] = useState(0);
   const [pngImages, setPngImages] = useState<ConvertedImage[]>([]);
@@ -231,6 +233,8 @@ export default function PdfEditor() {
     graphics,
     watermark,
   }), [contentEdits, graphics, watermark, headerFooter, pageEntries, pageNumbering, textBoxes]);
+  const latestSnapshotRef = useRef(editSnapshot);
+  useEffect(() => { latestSnapshotRef.current = editSnapshot; }, [editSnapshot]);
 
   const restoreSnapshot = useCallback((snapshot: PdfEditorDraftSnapshot) => {
     setPageEntries(snapshot.pageEntries);
@@ -845,11 +849,29 @@ export default function PdfEditor() {
     }
   };
 
-  const rotateSelectedPages = () => {
-    updatePageEntries(pageEntries.map((entry, index) => selectedPages.has(index)
-      ? { ...entry, rotation: ((entry.rotation + 90) % 360) as PagePlanEntry['rotation'] }
-      : entry));
-    setPngImages([]);
+  const rotateSelectedPages = async () => {
+    if (!pdf || isRotatingPages || selectedPages.size === 0) return;
+    setIsRotatingPages(true);
+    setOutputError(null);
+    try {
+      const nextEntries = pageEntries.map((entry, index) => selectedPages.has(index)
+        ? { ...entry, rotation: ((entry.rotation + 90) % 360) as PagePlanEntry['rotation'] }
+        : entry);
+      const rotatedGraphics = await rotateGraphicsToPagePlan(pdf, graphics, pageEntries, nextEntries);
+      // Do not overwrite another edit, undo, or a newly opened document while images decode.
+      if (latestSnapshotRef.current !== editSnapshot || pageEntriesRef.current !== pageEntries) {
+        setOutputMessage('処理中に編集内容が変わったため回転を中止しました。もう一度実行してください。');
+        return;
+      }
+      updatePageEntries(nextEntries);
+      setGraphics(rotatedGraphics);
+      setActiveGraphicId(null);
+      setPngImages([]);
+    } catch (error) {
+      setOutputError(error instanceof Error ? error.message : 'ページを回転できませんでした');
+    } finally {
+      setIsRotatingPages(false);
+    }
   };
 
   const duplicateSelectedPages = () => {
@@ -893,20 +915,35 @@ export default function PdfEditor() {
     setSelectedPages(new Set([insertAt]));
   };
 
-  const resetPageChanges = () => {
+  const resetPageChanges = async () => {
+    if (!pdf || isRotatingPages) return;
     const initialEntries = Array.from({ length: originalTotalPages }, (_, sourcePageIndex) => {
       const existing = pageEntries.find((entry) => entry.sourcePageIndex === sourcePageIndex);
       return existing
         ? { ...existing, rotation: 0 as const }
         : { id: crypto.randomUUID(), sourcePageIndex, rotation: 0 as const };
     });
-    updatePageEntries(initialEntries);
-    setSelectedPages(new Set());
-    setCurrentPage(1);
-    setExtractStart('');
-    setExtractEnd('');
-    setPngImages([]);
+    setIsRotatingPages(true);
     setOutputError(null);
+    try {
+      const rotated = await rotateGraphicsToPagePlan(pdf, graphics, pageEntries, initialEntries);
+      if (latestSnapshotRef.current !== editSnapshot || pageEntriesRef.current !== pageEntries) {
+        setOutputMessage('処理中に編集内容が変わったためリセットを中止しました。もう一度実行してください。');
+        return;
+      }
+      updatePageEntries(initialEntries);
+      setGraphics(remapGraphicsForPages(rotated, pageEntries, initialEntries));
+      setActiveGraphicId(null);
+      setSelectedPages(new Set());
+      setCurrentPage(1);
+      setExtractStart('');
+      setExtractEnd('');
+      setPngImages([]);
+    } catch (error) {
+      setOutputError(error instanceof Error ? error.message : 'ページ操作をリセットできませんでした');
+    } finally {
+      setIsRotatingPages(false);
+    }
   };
 
   const handleDragStart = (displayIndex: number) => {
@@ -1400,6 +1437,7 @@ export default function PdfEditor() {
         onSelectPattern={selectPagePattern}
         onDeleteSelectedPages={deleteSelectedPages}
         onRotateSelectedPages={rotateSelectedPages}
+        isRotatingPages={isRotatingPages}
         onDuplicateSelectedPages={duplicateSelectedPages}
         onInsertBlankPage={insertBlankPage}
         onResetPageChanges={resetPageChanges}
@@ -1420,7 +1458,11 @@ export default function PdfEditor() {
           graphics={graphics}
           onGraphicsChange={setGraphics}
           activeGraphicId={activeGraphicId}
-          onActiveGraphicChange={setActiveGraphicId}
+          onActiveGraphicChange={(id) => {
+            setActiveGraphicId(id);
+            const graphic = graphics.find((item) => item.id === id);
+            if (graphic && graphic.pageIndex >= 0) setCurrentPage(graphic.pageIndex + 1);
+          }}
           watermark={watermark}
           onWatermarkChange={setWatermark}
           currentPageIndex={currentPage - 1}

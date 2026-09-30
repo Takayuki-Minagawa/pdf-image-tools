@@ -268,3 +268,20 @@ describe('graphic page associations', () => {
     expect(copied.find((graphic) => graphic.pageIndex === 4)?.kind).toBe('line');
   });
 });
+
+
+describe('duplicated layers', () => {
+  it('keeps page-scoped marks between the same all-page layers on every copy', () => {
+    const entries = [{ id: 'page', sourcePageIndex: 0, rotation: 0 as const }];
+    const graphics = [
+      { ...createDefaultGraphic('image', -1), label: 'background' },
+      { ...createDefaultGraphic('rectangle', 0), label: 'local' },
+      { ...createDefaultGraphic('highlight', -1), label: 'foreground' },
+    ];
+    const copied = duplicateGraphicsForPages(graphics, entries, [...entries, { ...entries[0], id: 'copy' }]);
+    for (const pageIndex of [0, 1]) {
+      expect(copied.filter((item) => item.pageIndex === -1 || item.pageIndex === pageIndex).map((item) => item.label))
+        .toEqual(['background', 'local', 'foreground']);
+    }
+  });
+});

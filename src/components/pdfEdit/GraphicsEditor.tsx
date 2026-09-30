@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { ArrowDownToLine, ArrowUpToLine, Copy, ImagePlus, MousePointer2, PenLine, Trash2 } from 'lucide-react';
+import { NumericInput } from './NumericInput';
 import { createDefaultGraphic } from '../../types/pdfGraphics';
 import type { PdfGraphic } from '../../types/pdfGraphics';
 
@@ -62,22 +63,6 @@ async function readImage(file: File): Promise<{ dataUrl: string; width: number; 
     image.onerror = () => reject(new Error('この画像を読み込めませんでした。別の PNG / JPEG をお試しください。'));
     image.src = dataUrl;
   });
-}
-
-function NumericInput({ label, value, min = 0, max = 14400, onChange }: {
-  label: string; value: number; min?: number; max?: number; onChange: (value: number) => void;
-}) {
-  const [draft, setDraft] = useState<string | null>(null);
-  return (
-    <label className="block text-xs font-medium text-gray-600">
-      {label}
-      <input type="number" min={min} max={max} step={0.1} value={draft ?? Math.round(value * 100) / 100} className={`${inputClass} mt-1`} onFocus={(event) => setDraft(event.target.value)} onBlur={() => setDraft(null)} onChange={(event) => {
-        setDraft(event.target.value);
-        const number = event.target.valueAsNumber;
-        if (Number.isFinite(number)) onChange(Math.min(max, Math.max(min, number)));
-      }} />
-    </label>
-  );
 }
 
 function SignaturePad({ onAdd, onClose }: { onAdd: (dataUrl: string, width: number, height: number) => void; onClose: () => void }) {

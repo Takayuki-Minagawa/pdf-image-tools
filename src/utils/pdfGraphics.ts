@@ -12,7 +12,7 @@ import {
   type PDFImage,
   type PDFPage,
 } from 'pdf-lib';
-import fontkit from '@pdf-lib/fontkit';
+import { pdfFontkit } from './pdfFontkit';
 import type { PagePlanEntry } from '../types/pdfEdit';
 import type { PdfGraphic, WatermarkConfig } from '../types/pdfGraphics';
 import { loadFontBytes } from './fontLoader';
@@ -193,7 +193,7 @@ export async function applyPdfGraphics(
     }
     // Shapes/images never fetch a font. ASCII-only watermarks use a standard font.
     const needsUnicode = /[^\x20-\x7e]/.test(text);
-    if (needsUnicode) document.registerFontkit(fontkit);
+    if (needsUnicode) document.registerFontkit(pdfFontkit);
     const font = needsUnicode
       ? await document.embedFont(await loadFontBytes(), { subset: true })
       : await document.embedFont(StandardFonts.HelveticaBold);
@@ -235,8 +235,9 @@ export function remapGraphicsForPages(
 export function duplicateGraphicsForPages(
   graphics: PdfGraphic[], previousEntries: PagePlanEntry[], nextEntries: PagePlanEntry[],
 ): PdfGraphic[] {
-  const result = remapGraphicsForPages(graphics, previousEntries, nextEntries);
   const previousIndexById = new Map(previousEntries.map((entry, index) => [entry.id, index]));
+  const nextIndexById = new Map(nextEntries.map((entry, index) => [entry.id, index]));
+  const copiesBySourceIndex = new Map<number, number[]>();
   for (let index = 1; index < nextEntries.length; index++) {
     const entry = nextEntries[index];
     const previous = nextEntries[index - 1];
@@ -244,11 +245,19 @@ export function duplicateGraphicsForPages(
     const sourceIndex = previousIndexById.get(previous.id);
     if (sourceIndex === undefined || entry.sourcePageIndex !== previous.sourcePageIndex ||
         entry.rotation !== previous.rotation || entry.width !== previous.width || entry.height !== previous.height) continue;
-    for (const graphic of graphics) {
-      if (graphic.pageIndex === sourceIndex) {
-        result.push({ ...graphic, id: crypto.randomUUID(), pageIndex: index });
-      }
-    }
+    copiesBySourceIndex.set(sourceIndex, [...(copiesBySourceIndex.get(sourceIndex) ?? []), index]);
   }
-  return result;
+  // Insert each copy beside its source layer so global layers retain their z-order.
+  return graphics.flatMap((graphic) => {
+    if (graphic.pageIndex === -1) return [graphic];
+    const source = previousEntries[graphic.pageIndex];
+    const nextIndex = source ? nextIndexById.get(source.id) : undefined;
+    if (nextIndex === undefined) return [];
+    return [
+      { ...graphic, pageIndex: nextIndex },
+      ...(copiesBySourceIndex.get(graphic.pageIndex) ?? []).map((pageIndex) => ({
+        ...graphic, id: crypto.randomUUID(), pageIndex,
+      })),
+    ];
+  });
 }

@@ -30,6 +30,7 @@ interface PageManagementPanelProps {
   onSelectPattern: (pattern: 'odd' | 'even' | 'none') => void;
   onDeleteSelectedPages: () => void;
   onRotateSelectedPages: () => void;
+  isRotatingPages?: boolean;
   onDuplicateSelectedPages: () => void;
   onInsertBlankPage: () => void;
   onResetPageChanges: () => void;
@@ -107,6 +108,7 @@ export function PageManagementPanel({
   onSelectPattern,
   onDeleteSelectedPages,
   onRotateSelectedPages,
+  isRotatingPages = false,
   onDuplicateSelectedPages,
   onInsertBlankPage,
   onResetPageChanges,
@@ -144,8 +146,8 @@ export function PageManagementPanel({
               <button type="button" onClick={() => onSelectPattern('none')} className="flex w-full items-center gap-1 rounded px-3 py-2 text-left text-sm hover:bg-gray-50"><X className="h-3.5 w-3.5" />選択解除</button>
             </div>
           </details>
-          <button type="button" onClick={onRotateSelectedPages} disabled={selectedPages.size === 0} className="flex items-center gap-1 rounded-lg bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-40">
-            <RotateCw className="h-4 w-4" />90°回転
+          <button type="button" onClick={onRotateSelectedPages} disabled={selectedPages.size === 0 || isRotatingPages} className="flex items-center gap-1 rounded-lg bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-40">
+            <RotateCw className="h-4 w-4" />{isRotatingPages ? '回転中…' : '90°回転'}
           </button>
           <button type="button" onClick={onDuplicateSelectedPages} disabled={selectedPages.size === 0} className="flex items-center gap-1 rounded-lg bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-40">
             <Copy className="h-4 w-4" />複製
@@ -157,7 +159,7 @@ export function PageManagementPanel({
             <Trash2 className="h-4 w-4" />削除
           </button>
           {hasPageChanges && (
-            <button type="button" onClick={onResetPageChanges} className="flex items-center gap-2 rounded-lg bg-gray-200 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-300">
+            <button type="button" onClick={onResetPageChanges} disabled={isRotatingPages} className="flex items-center gap-2 rounded-lg bg-gray-200 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-300">
               <RotateCcw className="h-4 w-4" />リセット
             </button>
           )}
