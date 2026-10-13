@@ -1,9 +1,6 @@
-import type {
-  HeaderFooterSettings,
-  PageNumberingConfig,
-  PdfImageExportOptions,
-  TextBoxConfig,
-} from '../types/pdfEdit';
+import { parseRecipe, type PdfEditRecipe } from '../types/recipe';
+
+export type { PdfEditRecipe } from '../types/recipe';
 
 const STORAGE_KEY = 'pdf-image-tools:recipes:v1';
 const CHANGE_EVENT = 'pdf-image-tools:recipes-changed';
@@ -12,31 +9,23 @@ function notifyRecipeChange() {
   window.dispatchEvent(new CustomEvent(CHANGE_EVENT));
 }
 
-export interface PdfEditRecipe {
-  version: 1;
-  id: string;
-  name: string;
-  createdAt: number;
-  updatedAt: number;
-  textBoxes: TextBoxConfig[];
-  headerFooter: HeaderFooterSettings;
-  pageNumbering: PageNumberingConfig;
-  imageExportOptions: PdfImageExportOptions;
+function parseStoredRecipe(value: unknown): PdfEditRecipe | null {
+  try {
+    return parseRecipe(value);
+  } catch {
+    return null;
+  }
 }
 
-function isRecipe(value: unknown): value is PdfEditRecipe {
-  if (!value || typeof value !== 'object') return false;
-  const candidate = value as Partial<PdfEditRecipe>;
-  return candidate.version === 1 && typeof candidate.id === 'string' &&
-    typeof candidate.name === 'string' && Array.isArray(candidate.textBoxes) &&
-    Boolean(candidate.headerFooter) && Boolean(candidate.pageNumbering) &&
-    Boolean(candidate.imageExportOptions);
-}
-
+/** 端末内に保存したレシピを読み込む。旧形式（version 1）は読み込み時に現行形式へ移行する。 */
 export function loadRecipes(): PdfEditRecipe[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]') as unknown;
-    return Array.isArray(parsed) ? parsed.filter(isRecipe) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      const recipe = parseStoredRecipe(item);
+      return recipe ? [recipe] : [];
+    });
   } catch {
     return [];
   }
@@ -68,7 +57,11 @@ export function exportRecipe(recipe: PdfEditRecipe) {
 }
 
 export async function importRecipe(file: File) {
-  const parsed = JSON.parse(await file.text()) as unknown;
-  if (!isRecipe(parsed)) throw new Error('このファイルはPDF Image Toolsのレシピではありません');
-  return parsed;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await file.text());
+  } catch {
+    throw new Error('JSON として読み込めませんでした');
+  }
+  return parseRecipe(parsed);
 }

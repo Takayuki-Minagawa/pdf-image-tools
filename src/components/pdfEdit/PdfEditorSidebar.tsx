@@ -9,7 +9,7 @@ import { GraphicsEditor } from './GraphicsEditor';
 import { WatermarkEditor } from './WatermarkEditor';
 import type { PdfGraphic, WatermarkConfig } from '../../types/pdfGraphics';
 import type { TextBoxConfig, HeaderFooterSettings, PageNumberingConfig, PdfImageExportOptions } from '../../types/pdfEdit';
-import type { PdfEditRecipe } from '../../utils/recipeStorage';
+import type { PdfEditRecipe } from '../../types/recipe';
 import type { ContentEdit, RecognizedItem } from '../../types/contentEdit';
 
 export type EditorSubTab = 'content' | 'textbox' | 'header-footer' | 'page-number' | 'graphics' | 'watermark';
@@ -40,6 +40,8 @@ interface PdfEditorSidebarProps {
   recognizedItems: RecognizedItem[];
   selectedContentItem: RecognizedItem | null;
   contentEdits: ContentEdit[];
+  /** レシピ保存用: 全ページ分のコンテンツ編集 */
+  allContentEdits: ContentEdit[];
   onUpsertContentEdit: (edit: ContentEdit) => void;
   onRemoveContentEdit: (targetId: string) => void;
   onSelectContentItem: (id: string | null) => void;
@@ -50,7 +52,7 @@ interface PdfEditorSidebarProps {
   imageExportOptions: PdfImageExportOptions;
   onImageExportOptionsChange: (options: PdfImageExportOptions) => void;
   selectedPageCount: number;
-  onApplyRecipe: (recipe: PdfEditRecipe) => void;
+  onApplyRecipe: (recipe: PdfEditRecipe) => void | Promise<void>;
 }
 
 const SUB_TABS: { key: EditorSubTab; label: string; icon: typeof Type }[] = [
@@ -88,6 +90,7 @@ export function PdfEditorSidebar({
   recognizedItems,
   selectedContentItem,
   contentEdits,
+  allContentEdits,
   onUpsertContentEdit,
   onRemoveContentEdit,
   onSelectContentItem,
@@ -185,6 +188,9 @@ export function PdfEditorSidebar({
           headerFooter={headerFooter}
           pageNumbering={pageNumbering}
           imageExportOptions={imageExportOptions}
+          graphics={graphics}
+          watermark={watermark}
+          contentEdits={allContentEdits}
           onApply={onApplyRecipe}
         />
         <button

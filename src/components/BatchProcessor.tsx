@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Files, Play, RotateCcw, Square, Trash2 } from 'lucide-react';
 import { Dropzone } from './Dropzone';
 import { ProgressBar } from './ProgressBar';
-import { applyPdfEdits } from '../utils/pdfEditOperations';
+import { applyRecipeToPdf } from '../utils/recipeApply';
 import { loadRecipes, subscribeRecipeChanges } from '../utils/recipeStorage';
 import { downloadBinaryFilesAsZip, sanitizeFilename } from '../utils/download';
 
@@ -11,6 +11,8 @@ interface BatchFile {
   file: File;
   status: 'ready' | 'processing' | 'done' | 'error';
   error?: string;
+  /** 完了したが注意点がある場合（未一致のルールなど） */
+  warning?: string;
 }
 
 export default function BatchProcessor() {
@@ -58,18 +60,15 @@ export default function BatchProcessor() {
         setFiles((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'processing', error: undefined } : entry));
         try {
           const source = await item.file.arrayBuffer();
-          const edited = await applyPdfEdits(source, {
-            textBoxes: selectedRecipe.textBoxes,
-            headerFooter: selectedRecipe.headerFooter,
-            pageNumbering: selectedRecipe.pageNumbering,
-          }, item.file.name);
+          const { bytes: edited, unmatched } = await applyRecipeToPdf(source, selectedRecipe, { fileName: item.file.name });
+          const warning = unmatched.length > 0 ? `編集ルール${unmatched.length}件が一致しませんでした` : undefined;
           const baseName = `${sanitizeFilename(item.file.name.replace(/\.pdf$/i, ''), 'document')}_edited`;
           let filename = `${baseName}.pdf`;
           let suffix = 2;
           while (usedNames.has(filename.toLocaleLowerCase())) filename = `${baseName} (${suffix++}).pdf`;
           usedNames.add(filename.toLocaleLowerCase());
           results.push({ filename, data: edited });
-          setFiles((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'done' } : entry));
+          setFiles((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'done', warning } : entry));
         } catch (error) {
           const reason = error instanceof Error ? error.message : '処理できませんでした';
           setFiles((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'error', error: reason } : entry));
@@ -94,7 +93,7 @@ export default function BatchProcessor() {
     <div className="space-y-5">
       <div className="flex items-center gap-3">
         <div className="rounded-lg bg-cyan-100 p-3"><Files className="h-6 w-6 text-cyan-700" /></div>
-        <div><h2 className="text-xl font-bold text-gray-800">バッチ処理</h2><p className="text-sm text-gray-500">保存した作業レシピを複数のPDFへ適用します</p></div>
+        <div><h2 className="text-xl font-bold text-gray-800">バッチ処理</h2><p className="text-sm text-gray-500">保存した作業レシピ（テキスト・図形・透かし・コンテンツ編集ルール）を複数のPDFへ適用します</p></div>
       </div>
 
       {recipes.length === 0 ? (
@@ -112,7 +111,7 @@ export default function BatchProcessor() {
         <section className="rounded-lg border border-gray-200" aria-label="バッチ処理ファイル一覧">
           <div className="flex items-center justify-between border-b border-gray-200 p-3"><span className="text-sm font-semibold">{files.length}件</span><button type="button" disabled={isProcessing} onClick={() => setFiles([])} className="flex items-center gap-1 text-sm text-red-600 disabled:opacity-40"><Trash2 className="h-4 w-4" />クリア</button></div>
           <ul className="max-h-64 divide-y divide-gray-100 overflow-auto">
-            {files.map((item) => <li key={item.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm"><span className="min-w-0 truncate">{item.file.name}</span><span className={item.status === 'error' ? 'text-red-600' : item.status === 'done' ? 'text-green-600' : 'text-gray-500'} title={item.error}>{item.status === 'ready' ? '待機' : item.status === 'processing' ? '処理中' : item.status === 'done' ? '完了' : `失敗: ${item.error}`}</span></li>)}
+            {files.map((item) => <li key={item.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm"><span className="min-w-0 truncate">{item.file.name}</span><span className={item.status === 'error' ? 'text-red-600' : item.status === 'done' ? 'text-green-600' : 'text-gray-500'} title={item.error}>{item.status === 'ready' ? '待機' : item.status === 'processing' ? '処理中' : item.status === 'done' ? (item.warning ? `完了（${item.warning}）` : '完了') : `失敗: ${item.error}`}</span></li>)}
           </ul>
         </section>
       )}
@@ -120,7 +119,7 @@ export default function BatchProcessor() {
       {isProcessing && <ProgressBar progress={progress} label="レシピを適用中..." />}
       <div className="flex gap-2">
         <button type="button" onClick={() => void processFiles()} disabled={!selectedRecipe || files.length === 0 || isProcessing} className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-3 font-medium text-white hover:bg-cyan-800 disabled:opacity-40"><Play className="h-5 w-5" />バッチ処理を開始</button>
-        {isProcessing ? <button type="button" onClick={() => { cancelledRef.current = true; }} className="flex items-center gap-2 rounded-lg border border-red-300 px-4 py-3 text-red-700"><Square className="h-4 w-4" />停止</button> : <button type="button" onClick={() => { setFiles((current) => current.map((item) => ({ ...item, status: 'ready', error: undefined }))); setProgress(0); setMessage(''); }} className="flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-3 text-gray-700"><RotateCcw className="h-4 w-4" />状態をリセット</button>}
+        {isProcessing ? <button type="button" onClick={() => { cancelledRef.current = true; }} className="flex items-center gap-2 rounded-lg border border-red-300 px-4 py-3 text-red-700"><Square className="h-4 w-4" />停止</button> : <button type="button" onClick={() => { setFiles((current) => current.map((item) => ({ ...item, status: 'ready', error: undefined, warning: undefined }))); setProgress(0); setMessage(''); }} className="flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-3 text-gray-700"><RotateCcw className="h-4 w-4" />状態をリセット</button>}
       </div>
       {message && <p className="rounded-lg bg-green-50 p-3 text-sm text-green-700" role="status">{message}</p>}
     </div>
