@@ -6,14 +6,17 @@ import type {
   PdfImageExportOptions,
   TextBoxConfig,
 } from '../../types/pdfEdit';
+import type { PdfGraphic, WatermarkConfig } from '../../types/pdfGraphics';
+import type { ContentEdit } from '../../types/contentEdit';
+import { RECIPE_VERSION, type PdfEditRecipe } from '../../types/recipe';
 import {
   deleteRecipe,
   exportRecipe,
   importRecipe,
   loadRecipes,
   saveRecipe,
-  type PdfEditRecipe,
 } from '../../utils/recipeStorage';
+import { contentEditToRule } from '../../utils/contentRules';
 import { downloadBlob, sanitizeFilename } from '../../utils/download';
 
 interface RecipeManagerProps {
@@ -21,7 +24,21 @@ interface RecipeManagerProps {
   headerFooter: HeaderFooterSettings;
   pageNumbering: PageNumberingConfig;
   imageExportOptions: PdfImageExportOptions;
-  onApply: (recipe: PdfEditRecipe) => void;
+  graphics: PdfGraphic[];
+  watermark: WatermarkConfig;
+  contentEdits: ContentEdit[];
+  onApply: (recipe: PdfEditRecipe) => void | Promise<void>;
+}
+
+function summarizeRecipe(recipe: PdfEditRecipe): string {
+  const parts: string[] = [];
+  if (recipe.textBoxes.length) parts.push(`テキスト${recipe.textBoxes.length}`);
+  if (recipe.headerFooter.header.enabled || recipe.headerFooter.footer.enabled) parts.push('ヘッダー/フッター');
+  if (recipe.pageNumbering.enabled) parts.push('ページ番号');
+  if (recipe.graphics.length) parts.push(`図形${recipe.graphics.length}`);
+  if (recipe.watermark.enabled) parts.push('透かし');
+  if (recipe.contentRules.length) parts.push(`編集ルール${recipe.contentRules.length}`);
+  return parts.length ? parts.join('・') : '設定なし';
 }
 
 export function RecipeManager({
@@ -29,6 +46,9 @@ export function RecipeManager({
   headerFooter,
   pageNumbering,
   imageExportOptions,
+  graphics,
+  watermark,
+  contentEdits,
   onApply,
 }: RecipeManagerProps) {
   const [recipes, setRecipes] = useState(loadRecipes);
@@ -45,7 +65,7 @@ export function RecipeManager({
     const existing = recipes.find((recipe) => recipe.name === trimmedName);
     const now = Date.now();
     const recipe: PdfEditRecipe = {
-      version: 1,
+      version: RECIPE_VERSION,
       id: existing?.id ?? crypto.randomUUID(),
       name: trimmedName,
       createdAt: existing?.createdAt ?? now,
@@ -54,10 +74,13 @@ export function RecipeManager({
       headerFooter: structuredClone(headerFooter),
       pageNumbering: structuredClone(pageNumbering),
       imageExportOptions: structuredClone(imageExportOptions),
+      graphics: structuredClone(graphics),
+      watermark: structuredClone(watermark),
+      contentRules: contentEdits.map(contentEditToRule),
     };
     setRecipes(saveRecipe(recipe));
     setName('');
-    setMessage(`「${trimmedName}」を端末内に保存しました`);
+    setMessage(`「${trimmedName}」を端末内に保存しました（${summarizeRecipe(recipe)}）`);
   };
 
   const handleImport = async (file?: File) => {
@@ -65,7 +88,7 @@ export function RecipeManager({
     try {
       const recipe = await importRecipe(file);
       setRecipes(saveRecipe({ ...recipe, id: crypto.randomUUID(), updatedAt: Date.now() }));
-      setMessage(`「${recipe.name}」を読み込みました`);
+      setMessage(`「${recipe.name}」を読み込みました（${summarizeRecipe(recipe)}）`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'レシピを読み込めませんでした');
     }
@@ -77,7 +100,9 @@ export function RecipeManager({
         <FileJson className="h-4 w-4" />作業レシピ
       </summary>
       <div className="space-y-3 border-t border-gray-200 p-3">
-        <p className="text-xs text-gray-500">テキストボックス、ヘッダー、ページ番号、画像出力設定を再利用できます。</p>
+        <p className="text-xs text-gray-500">
+          テキストボックス、ヘッダー、ページ番号、図形・画像、透かし、コンテンツ編集（文字列一致・図形の位置で指定）、画像出力設定を再利用できます。JSONはバッチ処理やCLIの apply-recipe でも使えます。
+        </p>
         <div className="flex gap-2">
           <label className="sr-only" htmlFor="recipe-name">レシピ名</label>
           <input id="recipe-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="例: 請求書設定" className="min-w-0 flex-1 rounded-md border border-gray-300 px-2 py-1.5 text-sm" />
@@ -87,7 +112,7 @@ export function RecipeManager({
           <ul className="max-h-40 space-y-1 overflow-auto">
             {recipes.map((recipe) => (
               <li key={recipe.id} className="flex items-center gap-1 rounded-md bg-white p-1.5 text-xs">
-                <button type="button" onClick={() => { onApply(recipe); setMessage(`「${recipe.name}」を適用しました`); }} className="min-w-0 flex-1 truncate text-left font-medium text-blue-700 hover:underline">{recipe.name}</button>
+                <button type="button" title={summarizeRecipe(recipe)} onClick={() => { void onApply(recipe); }} className="min-w-0 flex-1 truncate text-left font-medium text-blue-700 hover:underline">{recipe.name}</button>
                 <button type="button" title="JSONで書き出す" aria-label={`${recipe.name}を書き出す`} onClick={() => downloadBlob(exportRecipe(recipe), `${sanitizeFilename(recipe.name, 'recipe')}.json`)} className="rounded p-1 hover:bg-gray-100"><Download className="h-3.5 w-3.5" /></button>
                 <button type="button" title="削除" aria-label={`${recipe.name}を削除`} onClick={() => setRecipes(deleteRecipe(recipe.id))} className="rounded p-1 text-red-600 hover:bg-red-50"><Trash2 className="h-3.5 w-3.5" /></button>
               </li>

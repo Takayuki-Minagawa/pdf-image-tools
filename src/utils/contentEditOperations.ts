@@ -6,7 +6,7 @@ import type {
   PathContentEdit,
   TextContentEdit,
 } from '../types/contentEdit';
-import { toRgb } from './pdfEditOperations';
+import { toRgb } from './pdfColor';
 import { loadFontBytes } from './fontLoader';
 import { redactTextFromPage } from './contentStreamRedaction';
 import { findResidualRedactions } from './redactionVerification';

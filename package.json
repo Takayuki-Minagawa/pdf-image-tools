@@ -8,7 +8,8 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && vite build -c vite.cli.config.ts",
+    "build:cli": "vite build -c vite.cli.config.ts",
     "lint": "eslint .",
     "test": "vitest run",
     "preview": "vite preview",

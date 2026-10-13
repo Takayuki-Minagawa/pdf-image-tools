@@ -21,17 +21,20 @@ import { PdfEditorPreview } from './pdfEdit/PdfEditorPreview';
 import { GraphicsOverlay } from './pdfEdit/GraphicsOverlay';
 import { PdfTextSearch } from './pdfEdit/PdfTextSearch';
 import { DEFAULT_WATERMARK, type PdfGraphic, type WatermarkConfig } from '../types/pdfGraphics';
-import { applyPdfGraphics, remapGraphicsForPages, duplicateGraphicsForPages } from '../utils/pdfGraphics';
+import { remapGraphicsForPages, duplicateGraphicsForPages } from '../utils/pdfGraphics';
 import { rotateGraphicsToPagePlan } from '../utils/pageGraphicRotation';
-import { applyPdfEdits } from '../utils/pdfEditOperations';
 import {
-  buildPdfFromPagePlan,
-  copyPdfBytes,
   downloadPdf,
   duplicatePagePlanSelection,
   extractPdfPageIndices,
   getUnrotatedPageSize,
 } from '../utils/pdfEditor';
+import {
+  buildEditedPdf as runEditPipeline,
+  createIdentityPagePlan,
+  hasPagePlanChanges,
+} from '../utils/editPipeline';
+import { resolveContentRules } from '../utils/contentRules';
 import { pdfBytesToImages } from '../utils/pdfToImages';
 import { usePdfDocument } from '../hooks/usePdfDocument';
 import { useUndoHistory } from '../hooks/useUndoHistory';
@@ -44,7 +47,7 @@ import {
   type OverlayContext,
 } from '../utils/overlayRenderer';
 import { recognizePageContent, hitTestRecognizedItems } from '../utils/contentRecognition';
-import { applyContentEdits, RedactionVerificationError } from '../utils/contentEditOperations';
+import { RedactionVerificationError } from '../utils/contentEditOperations';
 import type { ConvertedImage } from '../utils/pdfToImages';
 import type {
   TextBoxConfig,
@@ -69,7 +72,7 @@ import {
   type PdfEditorDraftSnapshot,
   type StoredPdfDraft,
 } from '../utils/draftStorage';
-import type { PdfEditRecipe } from '../utils/recipeStorage';
+import type { PdfEditRecipe } from '../types/recipe';
 import { downloadDataUrlsAsZip, sanitizeFilename } from '../utils/download';
 import {
   consumePendingPdf,
@@ -82,14 +85,6 @@ type RedactionFailureOperation = 'save' | 'extract-range' | 'extract-selected' |
 interface RedactionFailureState {
   error: RedactionVerificationError;
   operation: RedactionFailureOperation;
-}
-
-function createInitialPageEntries(pageCount: number): PagePlanEntry[] {
-  return Array.from({ length: pageCount }, (_, sourcePageIndex) => ({
-    id: crypto.randomUUID(),
-    sourcePageIndex,
-    rotation: 0,
-  }));
 }
 
 function formatBytes(bytes: number) {
@@ -212,17 +207,7 @@ export default function PdfEditor() {
     (edit) => edit.kind === 'text' && edit.action === 'redact',
   );
   redactionDraftBlockedRef.current = hasRedactions;
-  const hasPageChanges =
-    pageEntries.length > 0 &&
-    (pageEntries.length !== originalTotalPages ||
-      pageEntries.some((entry, index) =>
-        entry.sourcePageIndex !== index || entry.rotation !== 0,
-      ));
-  const hasOverlayEdits =
-    textBoxes.length > 0 ||
-    headerFooter.header.enabled ||
-    headerFooter.footer.enabled ||
-    pageNumbering.enabled;
+  const hasPageChanges = hasPagePlanChanges(pageEntries, originalTotalPages);
 
   const editSnapshot = useMemo<PdfEditorDraftSnapshot>(() => ({
     pageEntries,
@@ -279,7 +264,7 @@ export default function PdfEditor() {
     const pendingDraft = pendingDraftRef.current;
     const initialEntries = pendingDraft?.snapshot.pageEntries.length
       ? pendingDraft.snapshot.pageEntries
-      : createInitialPageEntries(pdf.numPages);
+      : createIdentityPagePlan(pdf.numPages);
     setPageEntries(initialEntries);
     pageEntriesRef.current = initialEntries;
     setSelectedPages(new Set());
@@ -979,62 +964,22 @@ export default function PdfEditor() {
     updatePageEntries(nextEntries);
   };
 
+  // 保存・抽出・画像出力は共通パイプライン（バッチ処理・CLIと同一の適用順序）を使う。
   const buildEditedPdf = useCallback(async (allowCoverOnly = false) => {
     if (!pdfBytes || !pdfFile) {
       throw new Error('PDFが読み込まれていません');
     }
-
-    let workingPdf: ArrayBuffer | Uint8Array = pdfBytes;
-
-    if (hasPageChanges) {
-      workingPdf = await buildPdfFromPagePlan(workingPdf, pageEntries);
-    }
-
-    // ページ計画を反映した後、entry idを最終ページ番号へ変換する。
-    // 同じ元ページを複製しても、選択したコピーだけを編集できる。
-    const scopedContentEdits = contentEdits.flatMap((edit) => {
-      const pageIndex = edit.pageEntryId
-        ? pageEntries.findIndex((entry) => entry.id === edit.pageEntryId)
-        : pageEntries.findIndex((entry) => entry.sourcePageIndex === edit.target.pageIndex);
-      return pageIndex === -1
-        ? []
-        : [{ ...edit, target: { ...edit.target, pageIndex } } as ContentEdit];
-    });
-
-    if (scopedContentEdits.length > 0) {
-      try {
-        workingPdf = await applyContentEdits(
-          workingPdf,
-          scopedContentEdits,
-          undefined,
-          { failOnResidual: true },
-        );
-      } catch (error) {
-        if (!(error instanceof RedactionVerificationError)) throw error;
-        if (!allowCoverOnly) throw error;
-        workingPdf = error.coveredPdfBytes;
-      }
-    }
-
-    if (hasOverlayEdits) {
-      workingPdf = await applyPdfEdits(
-        workingPdf,
-        { textBoxes, headerFooter, pageNumbering },
-        pdfFile.name,
-      );
-    }
-
-    if (graphics.length > 0 || watermark.enabled) {
-      workingPdf = await applyPdfGraphics(workingPdf, graphics, watermark);
-    }
-    return copyPdfBytes(workingPdf);
+    return runEditPipeline(
+      pdfBytes,
+      { pageEntries, textBoxes, headerFooter, pageNumbering, contentEdits, graphics, watermark },
+      { fileName: pdfFile.name, originalPageCount: originalTotalPages, allowCoverOnly },
+    );
   }, [
     graphics,
     watermark,
     pdfBytes,
     pdfFile,
-    hasOverlayEdits,
-    hasPageChanges,
+    originalTotalPages,
     pageEntries,
     textBoxes,
     headerFooter,
@@ -1231,12 +1176,63 @@ export default function PdfEditor() {
     );
   }, [handleDownloadPng, imageExportOptions.filename, imageExportOptions.format, imageExportOptions.zip, pngImages]);
 
-  const applyRecipe = (recipe: PdfEditRecipe) => {
+  const applyRecipe = async (recipe: PdfEditRecipe) => {
+    setOutputError(null);
     setTextBoxes(structuredClone(recipe.textBoxes));
     setHeaderFooter(structuredClone(recipe.headerFooter));
     setPageNumbering(structuredClone(recipe.pageNumbering));
     setImageExportOptions(structuredClone(recipe.imageExportOptions));
-    setOutputMessage(`レシピ「${recipe.name}」を適用しました`);
+
+    // 図形は新しいIDで複製し、存在しないページ向けのもの・パス指定だけの画像は除外する。
+    const candidates: PdfGraphic[] = recipe.graphics
+      .filter((graphic) => graphic.pageIndex < displayPageCount)
+      .map((graphic) => {
+        const copy: PdfGraphic & { imagePath?: string } = { ...structuredClone(graphic), id: crypto.randomUUID() };
+        delete copy.imagePath;
+        return copy;
+      });
+    const skippedImages = candidates.filter((graphic) => graphic.kind === 'image' && !graphic.imageDataUrl).length;
+    setGraphics(candidates.filter((graphic) => graphic.kind !== 'image' || graphic.imageDataUrl));
+    setWatermark({
+      ...recipe.watermark,
+      pageIndex: recipe.watermark.pageIndex < displayPageCount ? recipe.watermark.pageIndex : -1,
+    });
+    setActiveGraphicId(null);
+
+    const notes: string[] = [];
+    if (skippedImages > 0) notes.push(`画像${skippedImages}件はファイルパス指定のため除外`);
+
+    // コンテンツ編集ルールは現在のPDFの認識結果へ解決する（ページ単位でキャッシュ）。
+    if (recipe.contentRules.length > 0 && pdf) {
+      try {
+        const cache = new Map(recognizedByPage);
+        const readPage = async (sourceIndex: number) => {
+          const cached = cache.get(sourceIndex);
+          if (cached) return cached;
+          const items = await recognizePageContent(await pdf.getPage(sourceIndex + 1));
+          cache.set(sourceIndex, items);
+          return items;
+        };
+        const resolved = await resolveContentRules(recipe.contentRules, pdf.numPages, readPage);
+        setRecognizedByPage(cache);
+        const scoped = resolved.edits.map((edit) => ({
+          ...edit,
+          pageEntryId: pageEntriesRef.current.find((entry) => entry.sourcePageIndex === edit.target.pageIndex)?.id,
+        }) as ContentEdit);
+        setContentEdits((previous) => [
+          ...previous.filter((edit) => !scoped.some((candidate) =>
+            candidate.target.id === edit.target.id && candidate.pageEntryId === edit.pageEntryId,
+          )),
+          ...scoped,
+        ]);
+        notes.push(`コンテンツ編集 ${resolved.edits.length}件を一致`);
+        if (resolved.unmatched.length > 0) notes.push(`ルール${resolved.unmatched.length}件は一致なし`);
+      } catch (error) {
+        setOutputError(`コンテンツ編集ルールを解決できませんでした: ${error instanceof Error ? error.message : '不明なエラー'}`);
+      }
+    }
+
+    setOutputMessage(`レシピ「${recipe.name}」を適用しました${notes.length ? `（${notes.join('、')}）` : ''}`);
   };
 
   if (!pdfFile) {
@@ -1483,6 +1479,7 @@ export default function PdfEditor() {
           recognizedItems={currentPageItems ?? []}
           selectedContentItem={selectedContentItem}
           contentEdits={currentPageContentEdits}
+          allContentEdits={contentEdits}
           onUpsertContentEdit={upsertContentEdit}
           onRemoveContentEdit={removeContentEdit}
           onSelectContentItem={setSelectedContentId}

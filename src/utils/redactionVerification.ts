@@ -8,12 +8,9 @@
  * 残っていれば「除去を保証できなかった対象」として呼び出し側へ返す。
  */
 import * as pdfjsLib from 'pdfjs-dist';
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { RecognizedTextItem } from '../types/contentEdit';
-
-if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
-}
+import { ensurePdfjsWorker } from './pdfjsWorker';
+import { getPdfjsDocumentOptions } from './pdfjsDocumentOptions';
 
 // 元の認識位置（ベースライン原点）と再抽出位置の許容差（pt）
 const POSITION_TOLERANCE = 4;
@@ -58,9 +55,10 @@ export async function findResidualRedactions(
 ): Promise<RecognizedTextItem[]> {
   if (targets.length === 0) return [];
 
+  ensurePdfjsWorker();
   let doc: Awaited<ReturnType<typeof pdfjsLib.getDocument>['promise']>;
   try {
-    doc = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise;
+    doc = await pdfjsLib.getDocument({ data: new Uint8Array(bytes), ...getPdfjsDocumentOptions() }).promise;
   } catch {
     return [...targets];
   }

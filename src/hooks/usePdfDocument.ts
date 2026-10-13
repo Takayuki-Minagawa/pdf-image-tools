@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument } from 'pdf-lib';
+import { ensurePdfjsWorker } from '../utils/pdfjsWorker';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+ensurePdfjsWorker();
 
 const THUMBNAIL_SCALE = 0.3;
 const INITIAL_THUMBNAIL_COUNT = 12;

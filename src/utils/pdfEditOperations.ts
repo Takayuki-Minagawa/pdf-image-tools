@@ -1,4 +1,4 @@
-import { PDFDocument, degrees, rgb, PDFFont, type PDFPage } from 'pdf-lib';
+import { PDFDocument, type PDFFont, type PDFPage } from 'pdf-lib';
 import { pdfFontkit } from './pdfFontkit';
 import type {
   TextBoxConfig,
@@ -8,49 +8,12 @@ import type {
   PdfEditState,
 } from '../types/pdfEdit';
 import { loadFontBytes } from './fontLoader';
+import { withVisualSpace } from './pageGeometry';
+import { toOptionalRgb, toRgb } from './pdfColor';
 
-export function toRgb(hex: string) {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  if (!result) return rgb(0, 0, 0);
-  return rgb(
-    parseInt(result[1], 16) / 255,
-    parseInt(result[2], 16) / 255,
-    parseInt(result[3], 16) / 255,
-  );
-}
-
-function pageVisualGeometry(page: PDFPage) {
-  const { x, y, width, height } = page.getMediaBox();
-  const rotation = ((page.getRotation().angle % 360) + 360) % 360 as 0 | 90 | 180 | 270;
-  const swapsDimensions = rotation === 90 || rotation === 270;
-  return {
-    x,
-    y,
-    width,
-    height,
-    rotation,
-    visualWidth: swapsDimensions ? height : width,
-    visualHeight: swapsDimensions ? width : height,
-  };
-}
-
-/** 回転後に見えるページの左上座標を、PDFユーザー空間へ戻す。 */
-export function visualPointToPdf(page: PDFPage, visualX: number, visualY: number) {
-  const geometry = pageVisualGeometry(page);
-  switch (geometry.rotation) {
-    case 90:
-      return { x: geometry.x + visualY, y: geometry.y + visualX };
-    case 180:
-      return { x: geometry.x + geometry.width - visualX, y: geometry.y + visualY };
-    case 270:
-      return {
-        x: geometry.x + geometry.width - visualY,
-        y: geometry.y + geometry.height - visualX,
-      };
-    default:
-      return { x: geometry.x + visualX, y: geometry.y + geometry.height - visualY };
-  }
-}
+export { toRgb } from './pdfColor';
+/** @deprecated `visualToPdf` (pageGeometry) を使用。CropBox と UserUnit を考慮する。 */
+export { visualToPdf as visualPointToPdf } from './pageGeometry';
 
 function isCjkChar(char: string): boolean {
   const code = char.codePointAt(0) ?? 0;
@@ -180,79 +143,102 @@ export function resolvePlaceholders(
     .replace(/\{\{filename\}\}/g, fileName);
 }
 
+/** 対象ページ（-1 は全ページ）を 0 始まりの配列へ展開する。範囲外は無視。 */
+export function expandPageTargets(pageIndex: number, pageCount: number): number[] {
+  if (pageIndex === -1) return Array.from({ length: pageCount }, (_, index) => index);
+  return pageIndex >= 0 && pageIndex < pageCount ? [pageIndex] : [];
+}
+
+/** 1つのテキストボックスを、表示と一致する座標系（左上原点・物理pt）で描画する。 */
+export function drawTextBox(page: PDFPage, box: TextBoxConfig, font: PDFFont) {
+  withVisualSpace(page, ({ height: visualHeight }) => {
+    const bottom = visualHeight - box.y - box.height;
+    const background = toOptionalRgb(box.backgroundColor);
+    if (background) {
+      page.drawRectangle({ x: box.x, y: bottom, width: box.width, height: box.height, color: background });
+    }
+
+    if (box.borderStyle !== 'none' && box.borderWidth > 0) {
+      const borderDashArray =
+        box.borderStyle === 'dashed' ? [4, 4] : box.borderStyle === 'dotted' ? [1, 2] : undefined;
+      page.drawRectangle({
+        x: box.x,
+        y: bottom,
+        width: box.width,
+        height: box.height,
+        borderColor: toRgb(box.borderColor),
+        borderWidth: box.borderWidth,
+        borderDashArray,
+      });
+    }
+
+    if (box.text) {
+      const padding = 4;
+      const maxWidth = box.width - padding * 2;
+      const lines = wrapText(box.text, font, box.fontSize, maxWidth);
+      const lineHeight = box.fontSize * 1.3;
+      for (let i = 0; i < lines.length; i++) {
+        const visualBaselineY = box.y + padding + box.fontSize + i * lineHeight;
+        if (visualBaselineY > box.y + box.height - padding) break;
+        page.drawText(lines[i], {
+          x: box.x + padding,
+          y: visualHeight - visualBaselineY,
+          size: box.fontSize,
+          font,
+          color: toRgb(box.fontColor),
+        });
+      }
+    }
+  });
+}
+
 function applyTextBoxes(pdfDoc: PDFDocument, textBoxes: TextBoxConfig[], font: PDFFont) {
   const pageCount = pdfDoc.getPageCount();
-
   for (const box of textBoxes) {
-    const pagesToApply: number[] = [];
-    if (box.pageIndex === -1) {
-      for (let i = 0; i < pageCount; i++) pagesToApply.push(i);
-    } else if (box.pageIndex >= 0 && box.pageIndex < pageCount) {
-      pagesToApply.push(box.pageIndex);
-    }
-
-    for (const pageIdx of pagesToApply) {
-      const page = pdfDoc.getPage(pageIdx);
-      const rotation = pageVisualGeometry(page).rotation;
-      const rectangleOrigin = visualPointToPdf(page, box.x, box.y + box.height);
-
-      // Draw background
-      if (box.backgroundColor !== 'transparent' && box.backgroundColor !== '') {
-        page.drawRectangle({
-          x: rectangleOrigin.x,
-          y: rectangleOrigin.y,
-          width: box.width,
-          height: box.height,
-          color: toRgb(box.backgroundColor),
-          rotate: degrees(rotation),
-        });
-      }
-
-      // Draw border
-      if (box.borderStyle !== 'none' && box.borderWidth > 0) {
-        const borderDashArray =
-          box.borderStyle === 'dashed'
-            ? [4, 4]
-            : box.borderStyle === 'dotted'
-              ? [1, 2]
-              : undefined;
-
-        page.drawRectangle({
-          x: rectangleOrigin.x,
-          y: rectangleOrigin.y,
-          width: box.width,
-          height: box.height,
-          borderColor: toRgb(box.borderColor),
-          borderWidth: box.borderWidth,
-          borderDashArray,
-          rotate: degrees(rotation),
-        });
-      }
-
-      // Draw text
-      if (box.text) {
-        const padding = 4;
-        const maxWidth = box.width - padding * 2;
-        const lines = wrapText(box.text, font, box.fontSize, maxWidth);
-        const lineHeight = box.fontSize * 1.3;
-
-        for (let i = 0; i < lines.length; i++) {
-          const visualBaselineY = box.y + padding + box.fontSize + i * lineHeight;
-          if (visualBaselineY > box.y + box.height - padding) break;
-          const textOrigin = visualPointToPdf(page, box.x + padding, visualBaselineY);
-
-          page.drawText(lines[i], {
-            x: textOrigin.x,
-            y: textOrigin.y,
-            size: box.fontSize,
-            font,
-            color: toRgb(box.fontColor),
-            rotate: degrees(rotation),
-          });
-        }
-      }
+    for (const pageIdx of expandPageTargets(box.pageIndex, pageCount)) {
+      drawTextBox(pdfDoc.getPage(pageIdx), box, font);
     }
   }
+}
+
+/** 表示座標系で、上端または下端の余白に揃えたテキストを配置する。 */
+function drawAlignedText(
+  page: PDFPage,
+  font: PDFFont,
+  text: string,
+  options: {
+    fontSize: number;
+    color: string;
+    align: 'left' | 'center' | 'right';
+    edge: 'top' | 'bottom';
+    margin: number;
+    marginHorizontal: number;
+  },
+) {
+  if (!text) return;
+  withVisualSpace(page, ({ width: visualWidth, height: visualHeight }) => {
+    const { fontSize, align, edge, margin, marginHorizontal } = options;
+    const textWidth = font.widthOfTextAtSize(text, fontSize);
+    const x = align === 'left'
+      ? marginHorizontal
+      : align === 'center'
+        ? (visualWidth - textWidth) / 2
+        : visualWidth - marginHorizontal - textWidth;
+
+    // drawText positions by baseline; offset by ascent (top) / descent (bottom)
+    // so the text edge aligns with the margin.
+    const ascent = font.heightAtSize(fontSize, { descender: false });
+    const descent = font.heightAtSize(fontSize) - ascent;
+    const visualY = edge === 'top' ? margin + ascent : visualHeight - margin - descent;
+
+    page.drawText(text, {
+      x,
+      y: visualHeight - visualY,
+      size: fontSize,
+      font,
+      color: toRgb(options.color),
+    });
+  });
 }
 
 function applyHeaderFooter(
@@ -265,47 +251,22 @@ function applyHeaderFooter(
 
   for (let i = 0; i < pageCount; i++) {
     const page = pdfDoc.getPage(i);
-    const geometry = pageVisualGeometry(page);
     const pageNum = i + 1;
 
     const drawSection = (config: HeaderFooterSettings['header'], isHeader: boolean) => {
       const { fontSize, fontColor, margin, marginHorizontal, left, center, right } = config;
-
-      // drawText positions by baseline; offset by ascent (header) / descent (footer)
-      // so the text edge aligns with the margin
-      let visualY: number;
-      if (isHeader) {
-        const ascent = font.heightAtSize(fontSize, { descender: false });
-        visualY = margin + ascent;
-      } else {
-        const descent =
-          font.heightAtSize(fontSize) - font.heightAtSize(fontSize, { descender: false });
-        visualY = geometry.visualHeight - margin - descent;
-      }
-
-      const draw = (text: string, align: 'left' | 'center' | 'right') => {
-        if (!text) return;
-        const resolved = resolvePlaceholders(text, pageNum, pageCount, fileName);
-        const textWidth = font.widthOfTextAtSize(resolved, fontSize);
-        let x: number;
-        if (align === 'left') x = marginHorizontal;
-        else if (align === 'center') x = (geometry.visualWidth - textWidth) / 2;
-        else x = geometry.visualWidth - marginHorizontal - textWidth;
-
-        const origin = visualPointToPdf(page, x, visualY);
-        page.drawText(resolved, {
-          x: origin.x,
-          y: origin.y,
-          size: fontSize,
-          font,
-          color: toRgb(fontColor),
-          rotate: degrees(geometry.rotation),
+      const sections = [[left, 'left'], [center, 'center'], [right, 'right']] as const;
+      for (const [template, align] of sections) {
+        if (!template) continue;
+        drawAlignedText(page, font, resolvePlaceholders(template, pageNum, pageCount, fileName), {
+          fontSize,
+          color: fontColor,
+          align,
+          edge: isHeader ? 'top' : 'bottom',
+          margin,
+          marginHorizontal,
         });
-      };
-
-      draw(left, 'left');
-      draw(center, 'center');
-      draw(right, 'right');
+      }
     };
 
     if (settings.header.enabled) drawSection(settings.header, true);
@@ -318,44 +279,35 @@ function applyPageNumbers(pdfDoc: PDFDocument, config: PageNumberingConfig, font
   const startIndex = Math.max(0, config.startPage - 1);
 
   for (let i = startIndex; i < pageCount; i++) {
-    const page = pdfDoc.getPage(i);
-    const geometry = pageVisualGeometry(page);
-
     const displayNum = config.startNumber + (i - startIndex);
     const text = formatPageNumber(displayNum, config.format, config.prefix, config.suffix);
-    const textWidth = font.widthOfTextAtSize(text, config.fontSize);
-
-    let x: number;
-    if (config.position.includes('left')) {
-      x = config.margin;
-    } else if (config.position.includes('right')) {
-      x = geometry.visualWidth - config.margin - textWidth;
-    } else {
-      x = (geometry.visualWidth - textWidth) / 2;
-    }
-
-    let visualY: number;
-    if (config.position.startsWith('top')) {
-      const ascent = font.heightAtSize(config.fontSize, { descender: false });
-      visualY = config.margin + ascent;
-    } else {
-      const descent = font.heightAtSize(config.fontSize) - font.heightAtSize(config.fontSize, { descender: false });
-      visualY = geometry.visualHeight - config.margin - descent;
-    }
-
-    const origin = visualPointToPdf(page, x, visualY);
-
-    page.drawText(text, {
-      x: origin.x,
-      y: origin.y,
-      size: config.fontSize,
-      font,
-      color: toRgb(config.fontColor),
-      rotate: degrees(geometry.rotation),
+    const align = config.position.includes('left')
+      ? 'left'
+      : config.position.includes('right') ? 'right' : 'center';
+    drawAlignedText(pdfDoc.getPage(i), font, text, {
+      fontSize: config.fontSize,
+      color: config.fontColor,
+      align,
+      edge: config.position.startsWith('top') ? 'top' : 'bottom',
+      margin: config.margin,
+      marginHorizontal: config.margin,
     });
   }
 }
 
+export function hasTextEdits(editState: PdfEditState): boolean {
+  return (
+    editState.textBoxes.length > 0 ||
+    editState.headerFooter.header.enabled ||
+    editState.headerFooter.footer.enabled ||
+    editState.pageNumbering.enabled
+  );
+}
+
+/**
+ * テキストボックス・ヘッダー/フッター・ページ番号を描画する。
+ * フォントは `loadFontBytes`（`setFontBytesSource` で差し替え可能）から取得する。
+ */
 export async function applyPdfEdits(
   pdfBytes: ArrayBuffer | Uint8Array,
   editState: PdfEditState,

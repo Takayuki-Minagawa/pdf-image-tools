@@ -104,5 +104,6 @@ describe('regular Noto Sans JP PDF subset outlines', () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
-  });
+    // The launcher rebuilds dist-cli/ when src/ changed, which takes a few seconds.
+  }, 90_000);
 });
