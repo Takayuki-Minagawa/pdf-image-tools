@@ -252,10 +252,21 @@ src/
 │       ├── PdfEditorFileBar.tsx    # ファイル情報・保存状態・Undo/Redo・自動保存バー
 │       ├── PdfEditorSidebar.tsx    # PDF編集サイドバー
 │       ├── PdfEditorPreview.tsx    # PDF編集プレビュー
+│       ├── PdfDocumentNotices.tsx  # メモリ使用量・パスワードPDF変換の注意表示
+│       ├── PdfOutputNameBar.tsx    # PDF出力名と操作履歴
+│       ├── PdfOutputStatus.tsx     # 出力結果・エラー・画像出力の進捗
 │       └── RedactionFailureDialog.tsx # 完全削除の検証失敗ダイアログ
 ├── hooks/
 │   ├── useDropzone.ts          # ドラッグ＆ドロップフック
-│   └── usePdfDocument.ts       # PDF読み込み・サムネイル生成フック
+│   ├── useEditorKeyboard.ts    # 未保存時の離脱警告・Undo/Redoショートカット
+│   ├── usePageContentRecognition.ts # 元ページのテキスト・図形認識（ページ単位キャッシュ）
+│   ├── usePageNavigation.ts    # 表示ページ番号とページ番号入力
+│   ├── usePdfDocument.ts       # PDF読み込み・サムネイル生成フック
+│   ├── usePdfDraftAutosave.ts  # 下書きの自動保存・再開・保存領域の使用量
+│   ├── usePdfEditorOutput.ts   # 編集済みPDFの保存・抽出・画像出力・完全削除失敗時の再試行
+│   ├── usePdfPageRenderer.ts   # プレビューキャンバスへのページ描画
+│   ├── usePreviewOverlay.ts    # プレビューへの編集内容の重ね描き
+│   └── useUndoHistory.ts       # Undo/Redo履歴
 ├── types/
 │   ├── contentEdit.ts          # 既存コンテンツ認識・編集の型定義
 │   ├── pdfEdit.ts              # PDF編集の型定義
@@ -264,6 +275,7 @@ src/
 ├── utils/
 │   ├── arrayUtils.ts           # 配列の並び替え・ページ範囲変換
 │   ├── async.ts                # 中断（AbortSignal）・フレーム待ちの共通処理
+│   ├── contentEditScope.ts     # コンテンツ編集の適用ページ（ページエントリー）単位の管理
 │   ├── contentEditOperations.ts # 既存コンテンツ編集の適用（カバー+再描画・完全削除）
 │   ├── contentRecognition.ts   # テキスト・パス認識（pdf.jsオペレータ解析）
 │   ├── contentRules.ts         # レシピのコンテンツ編集ルールを認識結果へ解決
@@ -274,6 +286,7 @@ src/
 │   ├── imageToPdfSettings.ts   # 画像→PDF設定の保存値の検証・読み込み
 │   ├── imagesToPdf.ts          # 画像→PDF変換ユーティリティ
 │   ├── overlayRenderer.ts      # プレビューオーバーレイ描画
+│   ├── pageSelection.ts        # ページ選択（範囲・全選択・奇数/偶数）
 │   ├── pageGeometry.ts         # 表示座標系（CropBox・回転・UserUnit）とPDF座標の変換
 │   ├── pdfColor.ts             # 16進カラー→pdf-lib RGB
 │   ├── pdfEditOperations.ts    # テキストボックス・ヘッダー/フッター・ページ番号の描画
@@ -283,6 +296,7 @@ src/
 │   ├── pdfMergeUtils.ts        # PDF結合の並び替え・エラー分類・ファイル名整形
 │   ├── pdfInspection.ts        # PDF構造（テキスト・パス）の抽出（CLI inspect・ルール解決）
 │   ├── pdfToImages.ts          # PDF→画像変換ユーティリティ
+│   ├── recipeEditor.ts         # レシピの図形・透かしをPDF編集画面へ合わせる
 │   ├── recipeApply.ts          # レシピを1つのPDFへ適用（バッチ・CLI共通）
 │   └── recipeStorage.ts        # レシピの端末内保存・JSON入出力
 ├── App.tsx
