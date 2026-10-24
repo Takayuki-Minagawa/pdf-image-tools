@@ -141,10 +141,15 @@ export function usePdfDraftAutosave({
     ].join('|')
     : null;
   const [lastScheduleKey, setLastScheduleKey] = useState<string | null>(null);
+  const [statusBeforeSaving, setStatusBeforeSaving] = useState<DraftStatus>('idle');
   if (scheduleKey !== lastScheduleKey) {
     setLastScheduleKey(scheduleKey);
-    if (scheduleKey !== null) setDraftStatus('saving');
-    else if (draftStatus === 'saving') setDraftStatus(draftSavedAt ? 'saved' : 'idle');
+    if (scheduleKey !== null) {
+      if (draftStatus !== 'saving') setStatusBeforeSaving(draftStatus);
+      setDraftStatus('saving');
+    } else if (draftStatus === 'saving') {
+      setDraftStatus(statusBeforeSaving);
+    }
   }
 
   useEffect(() => {
