@@ -1,6 +1,7 @@
 import { PDFDocument, degrees } from 'pdf-lib';
 import type { ContentEdit } from '../types/contentEdit';
 import type { PagePlanEntry, TextBoxConfig } from '../types/pdfEdit';
+import type { WatermarkConfig } from '../types/pdfGraphics';
 import { downloadBlob } from './download';
 import { saveReachablePdfDocument } from './pdfSerialization';
 
@@ -17,6 +18,68 @@ export function getUnrotatedPageSize(
   return rotation === 90 || rotation === 270
     ? { width: pageSize.height, height: pageSize.width }
     : pageSize;
+}
+
+/**
+ * ページ構成の変更前後で、同じページエントリーを指す表示インデックスを返す。
+ * 対象ページが削除された場合は -1。
+ */
+export function remapPageIndex(
+  pageIndex: number,
+  previousEntries: PagePlanEntry[],
+  nextEntries: PagePlanEntry[],
+): number {
+  const entryId = previousEntries[pageIndex]?.id;
+  if (!entryId) return -1;
+  return nextEntries.findIndex((entry) => entry.id === entryId);
+}
+
+export function remapPageSelection(
+  selectedPages: Set<number>,
+  previousEntries: PagePlanEntry[],
+  nextEntries: PagePlanEntry[],
+): Set<number> {
+  const nextSelected = new Set<number>();
+  selectedPages.forEach((displayIndex) => {
+    const nextIndex = remapPageIndex(displayIndex, previousEntries, nextEntries);
+    if (nextIndex !== -1) nextSelected.add(nextIndex);
+  });
+  return nextSelected;
+}
+
+/** 全ページ指定（-1）はそのまま、削除されたページのテキストボックスは取り除く。 */
+export function remapTextBoxesForPagePlan(
+  textBoxes: TextBoxConfig[],
+  previousEntries: PagePlanEntry[],
+  nextEntries: PagePlanEntry[],
+): TextBoxConfig[] {
+  return textBoxes.flatMap((box) => {
+    if (box.pageIndex === -1) return [box];
+    const nextIndex = remapPageIndex(box.pageIndex, previousEntries, nextEntries);
+    return nextIndex === -1 ? [] : [{ ...box, pageIndex: nextIndex }];
+  });
+}
+
+/** 対象ページが削除された透かしは無効化する。 */
+export function remapWatermarkForPagePlan(
+  watermark: WatermarkConfig,
+  previousEntries: PagePlanEntry[],
+  nextEntries: PagePlanEntry[],
+): WatermarkConfig {
+  if (watermark.pageIndex === -1) return watermark;
+  const nextIndex = remapPageIndex(watermark.pageIndex, previousEntries, nextEntries);
+  return nextIndex === -1
+    ? { ...watermark, enabled: false, pageIndex: -1 }
+    : { ...watermark, pageIndex: nextIndex };
+}
+
+/** 削除されたページエントリーに紐づくコンテンツ編集を取り除く。 */
+export function retainContentEditsForPagePlan(
+  contentEdits: ContentEdit[],
+  nextEntries: PagePlanEntry[],
+): ContentEdit[] {
+  const retainedEntryIds = new Set(nextEntries.map((entry) => entry.id));
+  return contentEdits.filter((edit) => !edit.pageEntryId || retainedEntryIds.has(edit.pageEntryId));
 }
 
 export function duplicatePagePlanSelection(

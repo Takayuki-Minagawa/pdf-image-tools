@@ -1,8 +1,6 @@
 import * as pdfjsLib from 'pdfjs-dist';
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-
-// PDF.js workerの設定
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+import { throwIfAborted as throwIfSignalAborted } from './async';
+import { ensurePdfjsWorker } from './pdfjsWorker';
 
 export interface ConvertedImage {
   pageNumber: number;
@@ -22,8 +20,10 @@ export interface PdfToImagesOptions {
   signal?: AbortSignal;
 }
 
+const CANCELLED_MESSAGE = '画像出力をキャンセルしました';
+
 function throwIfAborted(signal?: AbortSignal) {
-  if (signal?.aborted) throw new DOMException('画像出力をキャンセルしました', 'AbortError');
+  throwIfSignalAborted(signal, CANCELLED_MESSAGE);
 }
 
 function formatToMime(format: NonNullable<PdfToImagesOptions['format']>) {
@@ -42,6 +42,7 @@ export async function pdfBytesToImages(
   const format = options.format ?? 'png';
   const quality = Math.min(1, Math.max(0.1, options.quality ?? 0.92));
   throwIfAborted(options.signal);
+  ensurePdfjsWorker();
   const pdf = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
   const images: ConvertedImage[] = [];
   try {
@@ -69,7 +70,7 @@ export async function pdfBytesToImages(
         try {
           await renderTask.promise;
         } catch (error) {
-          if (options.signal?.aborted) throw new DOMException('画像出力をキャンセルしました', 'AbortError');
+          throwIfAborted(options.signal);
           throw error;
         } finally {
           options.signal?.removeEventListener('abort', cancelRender);
