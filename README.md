@@ -49,6 +49,8 @@
   - ページの削除
   - ページの並び替え（ドラッグ＆ドロップ）
   - 現在の並び順・編集内容を反映したページ抽出
+  - ページ番号の指定（例: `1-3,5,8-`）でページを一括選択
+  - **PDF分割**：Nページごと / 範囲指定（例: `1-3; 4-8; 9-`）/ 選択ページの前で区切る の3方式で、編集内容を反映した複数のPDFをZIPで保存
   - 編集済みPDFを保存
   - 同じ編集結果をオプションでPNG出力
   - 元のPDFをそのままPNG出力する用途にも対応
@@ -68,12 +70,15 @@
   - 表示形式：数字 / ローマ数字（大文字・小文字） / ダッシュ付き（- 1 -）
   - 6箇所の配置位置（左上・中央上・右上・左下・中央下・右下）
   - 接頭辞・接尾辞のカスタマイズ
+- **文書情報**
+  - タイトル・作成者・サブタイトル・キーワードを表示・編集し、保存・抽出・分割の出力に書き込み
 - リアルタイムプレビュー
 - フォントサブセット埋め込みによる出力サイズ最適化
 
 ### 使いやすさ・安全性
 
 - PDF編集のUndo / Redo、操作履歴、未保存警告
+- キーボードショートカット：Ctrl（⌘）+ S で保存、Ctrl（⌘）+ Z / Shift + Z で元に戻す / やり直し、プレビュー選択中は ←/→・PageUp/PageDown でページ移動、Home/End で先頭/最終ページ、+/− でズーム
 - IndexedDBへのローカル下書き自動保存と再開（無効化・削除可能）
 - ページの回転、複製、空白ページ挿入、奇数/偶数/範囲選択、任意ページ抽出
 - 完全削除に失敗した場合は保存を停止し、残存文字とページを表示
@@ -132,13 +137,21 @@ npm run cli -- merge combined.pdf cover.pdf body.pdf
 npm run cli -- extract report.pdf summary.pdf 1-3,8
 npm run cli -- reorder scan.pdf sorted.pdf 3,1,2
 npm run cli -- rotate scan.pdf fixed.pdf 90 --pages 2,4
+npm run cli -- split book.pdf chapters --ranges "1-12;13-40;41-"
+npm run cli -- split scan.pdf pages --every 1
+npm run cli -- info report.pdf
+npm run cli -- set-metadata report.pdf final.pdf --title "月次報告" --author "総務部"
 npm run cli -- images-to-pdf photos.pdf 001.jpg 002.png
 npm run cli -- add-text report.pdf stamped.pdf "承認済" --page all --x 400 --y 40 --size 16 --color "#dc2626"
 npm run cli -- inspect report.pdf --pages 1 --kinds paths
 npm run cli -- apply-recipe report.pdf edited.pdf company-recipe.json
 ```
 
-ページ指定は1始まりで、`1-3,5,8` のように範囲と個別ページを組み合わせられます。`add-text` の位置は表示ページ左上を原点とした pt です。
+ページ指定は1始まりで、`1-3,5,8` のように範囲と個別ページを組み合わせられます。`9-` は9ページ目から最終ページまで、`-3` は先頭から3ページ目までを表します。`add-text` の位置は表示ページ左上を原点とした pt です。
+
+- `split` は `--every <n>`（nページごと）か `--ranges`（`;` 区切りの各グループを1ファイル）のどちらかを指定し、`<出力フォルダ>/<元ファイル名>_01_p1-12.pdf` のように連番で保存します（`--prefix` で接頭辞を変更）。
+- `info` はページ数・各ページのサイズと回転・文書情報（タイトル・作成者など）を JSON で出力します（`--out` でファイル保存）。
+- `set-metadata` は `--title` / `--author` / `--subject` / `--keywords` を書き換えます。値を付けずに指定した項目（例: `--author`）は削除します。
 
 ### inspect: ベクターデータとテキストの読み取り
 
@@ -210,6 +223,7 @@ npm run cli -- apply-recipe report.pdf edited.pdf company-recipe.json
 - 完全削除は保存前に文字抽出を再検証します。検証できない場合、既定では保存を停止します。
 - 背景が単色でない箇所の置換・削除では、カバーの跡が見える場合があります。
 - 下書きとレシピは端末内だけに保存され、外部へ送信されません。共有端末では自動保存を無効にできます。
+- 文書情報の変更は下書き・レシピには保存されません。PDFを保存するときに書き込まれます。
 - 図形・画像・サイン・透かしはページへ描画して保存します。コメント注釈や電子証明書によるデジタル署名ではありません。マーカーや図形で隠した元データは削除されません。
 - 追加した図形・画像は表示ページの左上を基準に配置します。全ページ指定ではページサイズごとの自動縮小は行いません。追加後にページを回転した場合、図形・画像・サインも元の内容と一緒に回転します。全ページ対象の図形は、その時点の各ページに個別配置へ切り替わります。
 - レシピとCLIはテキストボックス・ヘッダー/フッター・ページ番号・図形・画像・透かし・コンテンツ編集ルールを扱います。手書きサインは画像（data URL）としてレシピに保存されます。レシピの `contentRules` は文字列や形状・位置で既存要素を指定するため、レイアウトが異なる文書では一致しない場合があります（適用結果に一致件数を表示します）。
@@ -228,7 +242,7 @@ npm run cli -- apply-recipe report.pdf edited.pdf company-recipe.json
 src/
 ├── cli/
 │   ├── main.ts                 # CLI エントリ（引数解析・ファイル入出力、dist-cli/ へバンドル）
-│   ├── commands.ts             # CLI コマンド本体（merge / extract / rotate / add-text / inspect / apply-recipe）
+│   ├── commands.ts             # CLI コマンド本体（merge / extract / split / rotate / add-text / info / set-metadata / inspect / apply-recipe）
 │   └── pdfjsWorker.node.ts     # Node 用 pdf.js Worker 設定（no-op）
 ├── components/
 │   ├── Dropzone.tsx            # ファイルドロップゾーン
@@ -239,11 +253,12 @@ src/
 │   ├── ProgressBar.tsx         # 進捗バー
 │   └── pdfEdit/
 │       ├── ContentEditPanel.tsx    # 既存コンテンツ編集パネル
+│       ├── DocumentPropertiesEditor.tsx # 文書情報（タイトル・作成者など）の編集
 │       ├── RecipeManager.tsx       # 作業レシピの保存・読込・適用
 │       ├── TextBoxEditor.tsx       # テキストボックス設定パネル
 │       ├── HeaderFooterEditor.tsx  # ヘッダー/フッター設定パネル
 │       ├── PageNumberEditor.tsx    # ページ番号設定パネル
-│       ├── PageManagementPanel.tsx # ページ削除・並び替え・抽出パネル
+│       ├── PageManagementPanel.tsx # ページ削除・並び替え・抽出・分割パネル
 │       ├── PdfEditorSidebar.tsx    # PDF編集サイドバー
 │       └── PdfEditorPreview.tsx    # PDF編集プレビュー
 ├── hooks/
@@ -264,11 +279,13 @@ src/
 │   ├── overlayRenderer.ts      # プレビューオーバーレイ描画
 │   ├── pageGeometry.ts         # 表示座標系（CropBox・回転・UserUnit）とPDF座標の変換
 │   ├── pageOrderUtils.ts       # ページ並び替えユーティリティ
+│   ├── pageSpec.ts             # ページ指定（1-3,5,9-）の解析と分割計画・分割処理
 │   ├── pdfColor.ts             # 16進カラー→pdf-lib RGB
 │   ├── pdfEditOperations.ts    # テキストボックス・ヘッダー/フッター・ページ番号の描画
 │   ├── pdfEditor.ts            # PDFページ編集ユーティリティ
 │   ├── pdfGraphics.ts          # 図形・画像・透かしの描画
 │   ├── pdfInspection.ts        # PDF構造（テキスト・パス）の抽出（CLI inspect・ルール解決）
+│   ├── pdfMetadata.ts          # 文書情報（Info辞書）の読み書き
 │   ├── pdfToImages.ts          # PDF→画像変換ユーティリティ
 │   ├── recipeApply.ts          # レシピを1つのPDFへ適用（バッチ・CLI共通）
 │   └── recipeStorage.ts        # レシピの端末内保存・JSON入出力

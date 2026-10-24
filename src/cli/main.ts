@@ -18,12 +18,17 @@ import {
   addTextOptionsFromArgs,
   applyRecipe,
   extractPages,
+  info,
   inspect,
   mergePdfs,
+  metadataOptionsFromArgs,
   parseArgs,
   reorderPages,
   rotatePages,
+  setMetadata,
+  splitPages,
 } from './commands';
+import { splitPartFilename } from '../utils/pageSpec';
 
 export const HELP = `PDF Image Tools CLI
 
@@ -31,14 +36,29 @@ Usage:
   pdf-image-tools merge <output.pdf> <input1.pdf> <input2.pdf> [...]
   pdf-image-tools extract <input.pdf> <output.pdf> <pages>
   pdf-image-tools reorder <input.pdf> <output.pdf> <pages>
+  pdf-image-tools split <input.pdf> <output-dir> (--every <n> | --ranges <groups>) [--prefix <name>]
   pdf-image-tools rotate <input.pdf> <output.pdf> <degrees> [--pages <pages>]
   pdf-image-tools images-to-pdf <output.pdf> <image1> <image2> [...]
   pdf-image-tools add-text <input.pdf> <output.pdf> <text> [options]
+  pdf-image-tools info <input.pdf> [--out info.json]
+  pdf-image-tools set-metadata <input.pdf> <output.pdf> [--title <t>] [--author <a>] [--subject <s>] [--keywords <k>]
   pdf-image-tools inspect <input.pdf> [--pages <pages>] [--kinds all|text|paths] [--out result.json]
   pdf-image-tools apply-recipe <input.pdf> <output.pdf> <recipe.json> [--allow-cover-only]
 
 Page syntax:
   1-3,5,8    Ranges and individual pages are 1-based.
+  9-         From page 9 to the last page (-3 means pages 1 to 3).
+
+split:
+  --every <n>          one file per n pages (the last file holds the remainder)
+  --ranges "1-3;4-8;9-" one file per ;-separated group (each group uses the page syntax)
+  --prefix <name>      output file prefix (default: input file name)
+  Files are written as <prefix>_01_p1-3.pdf, <prefix>_02_p4-8.pdf, ...
+
+info / set-metadata:
+  info prints page count, page sizes and document properties as JSON.
+  set-metadata updates Title / Author / Subject / Keywords. An option without a value
+  (e.g. --author) removes that property.
 
 add-text options (coordinates are pt from the top-left of the displayed page):
   --page <n|all>  target page (default 1)      --x <pt> --y <pt>          position (default 50, 50)
@@ -61,6 +81,8 @@ Examples:
   pdf-image-tools merge combined.pdf cover.pdf body.pdf
   pdf-image-tools extract report.pdf summary.pdf 1-3,8
   pdf-image-tools rotate scan.pdf fixed.pdf 90 --pages 2,4
+  pdf-image-tools split book.pdf chapters --ranges "1-12;13-40;41-"
+  pdf-image-tools set-metadata report.pdf final.pdf --title "月次報告" --author "総務部"
   pdf-image-tools add-text report.pdf stamped.pdf "承認済" --page all --x 400 --y 40 --size 16 --color #dc2626
   pdf-image-tools inspect report.pdf --pages 1 --kinds paths
   pdf-image-tools apply-recipe report.pdf edited.pdf company-recipe.json
@@ -80,6 +102,18 @@ function installNodePolyfills() {
   const g = globalThis as Record<string, unknown>;
   for (const name of ['DOMMatrix', 'ImageData', 'Path2D']) {
     if (typeof g[name] === 'undefined') g[name] = class {};
+  }
+}
+
+async function writeJson(output: string | true | undefined, value: unknown, summary: string, env: CliEnvironment) {
+  const json = `${JSON.stringify(value, null, 2)}\n`;
+  if (typeof output === 'string') {
+    const absolute = resolve(output);
+    await mkdir(dirname(absolute), { recursive: true });
+    await writeFile(absolute, json, 'utf8');
+    env.stdout(`Saved ${absolute} (${summary})\n`);
+  } else {
+    env.stdout(json);
   }
 }
 
@@ -184,6 +218,39 @@ async function dispatch(argv: string[], env: CliEnvironment): Promise<void> {
       return;
     }
 
+    case 'split': {
+      const [input, outputDir] = positional;
+      if (!input || !outputDir) usage('split には input, output-dir が必要です');
+      let every: number | undefined;
+      if (options.every !== undefined) {
+        every = Number(options.every);
+        if (options.every === true || !Number.isInteger(every) || every < 1) usage('--every には1以上の整数を指定してください');
+      }
+      if (options.ranges === true) usage('--ranges にはページ範囲を指定してください');
+      const parts = await splitPages(await readPdf(input), { every, ranges: options.ranges });
+      const prefix = typeof options.prefix === 'string' ? options.prefix : basename(input, extname(input));
+      for (const [index, part] of parts.entries()) {
+        await save(resolve(outputDir, splitPartFilename(prefix, part, index, parts.length)), part.bytes, env);
+      }
+      env.stdout(`Split into ${parts.length} file(s)\n`);
+      return;
+    }
+
+    case 'info': {
+      const [input] = positional;
+      if (!input) usage('info には input が必要です');
+      const result = await info(await readPdf(input), basename(input));
+      await writeJson(options.out, result, `${result.pageCount} pages`, env);
+      return;
+    }
+
+    case 'set-metadata': {
+      const [input, output] = positional;
+      if (!input || !output) usage('set-metadata には input, output が必要です');
+      await save(output, await setMetadata(await readPdf(input), metadataOptionsFromArgs(options)), env);
+      return;
+    }
+
     case 'rotate': {
       const [input, output, degrees] = positional;
       if (!input || !output || degrees === undefined) usage('rotate には input, output, degrees が必要です');
@@ -216,16 +283,8 @@ async function dispatch(argv: string[], env: CliEnvironment): Promise<void> {
         pages: typeof options.pages === 'string' ? options.pages : undefined,
         kinds: typeof options.kinds === 'string' ? options.kinds : undefined,
       });
-      const json = `${JSON.stringify(result, null, 2)}\n`;
-      if (typeof options.out === 'string') {
-        const absolute = resolve(options.out);
-        await mkdir(dirname(absolute), { recursive: true });
-        await writeFile(absolute, json, 'utf8');
-        const itemCount = result.pages.reduce((total, page) => total + page.items.length, 0);
-        env.stdout(`Saved ${absolute} (${result.pages.length} pages, ${itemCount} items)\n`);
-      } else {
-        env.stdout(json);
-      }
+      const itemCount = result.pages.reduce((total, page) => total + page.items.length, 0);
+      await writeJson(options.out, result, `${result.pages.length} pages, ${itemCount} items`, env);
       return;
     }
 

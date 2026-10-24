@@ -9,12 +9,16 @@ import {
   addTextOptionsFromArgs,
   applyRecipe,
   extractPages,
+  info,
   inspect,
   mergePdfs,
+  metadataOptionsFromArgs,
   parseArgs,
   parsePageSpec,
   reorderPages,
   rotatePages,
+  setMetadata,
+  splitPages,
 } from './commands';
 
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
@@ -154,5 +158,31 @@ describe('add-text and apply-recipe', () => {
     expect(after.pages[1].items.some((item) => item.kind === 'path' && item.shape === 'rectangle')).toBe(true);
 
     await expect(applyRecipe(sample, recipe, { fileName: 'sample.pdf' })).rejects.toThrow(/imagePath/);
+  });
+});
+
+describe('split / info / set-metadata', () => {
+  it('splits every n pages or by ranges', async () => {
+    const input = await samplePdf();
+    expect(await Promise.all((await splitPages(input, { every: 1 })).map((part) => pageCount(part.bytes)))).toEqual([1, 1]);
+    const parts = await splitPages(input, { ranges: '2;1-' });
+    expect(parts.map((part) => part.label)).toEqual(['2', '1-2']);
+    await expect(splitPages(input, {})).rejects.toThrow(/どちらか一方/);
+    await expect(splitPages(input, { every: 1, ranges: '1' })).rejects.toThrow(/どちらか一方/);
+  });
+
+  it('reports page sizes and document properties', async () => {
+    const result = await info(await samplePdf(), 'sample.pdf');
+    expect(result).toMatchObject({ file: 'sample.pdf', pageCount: 2 });
+    expect(result.pages[1]).toEqual({ pageNumber: 2, width: 400, height: 500, rotation: 0 });
+  });
+
+  it('sets and removes metadata from CLI options', async () => {
+    expect(() => metadataOptionsFromArgs({})).toThrow(/いずれか/);
+    const metadata = metadataOptionsFromArgs({ title: '報告書', author: true });
+    expect(metadata).toEqual({ title: '報告書', author: '' });
+    const result = await info(await setMetadata(await samplePdf(), metadata), 'out.pdf');
+    expect(result.title).toBe('報告書');
+    expect(result.author).toBe('');
   });
 });

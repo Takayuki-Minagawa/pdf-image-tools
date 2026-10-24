@@ -12,7 +12,7 @@ const PURPOSES = [
   {
     tab: 'pdf-edit',
     title: 'PDFの内容を整える',
-    description: 'ページ整理、文字の追加・置換、墨消し、ページ番号、PNG出力ができます。',
+    description: 'ページ整理・分割、文字の追加・置換、墨消し、ページ番号、文書情報の編集、PNG出力ができます。',
     action: 'PDF編集を始める',
     icon: Pencil,
     iconClass: 'bg-amber-100 text-amber-700',
