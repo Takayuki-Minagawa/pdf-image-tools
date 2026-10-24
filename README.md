@@ -241,6 +241,9 @@ src/
 │   ├── pdfMerge/               # PDF結合の部品（ファイルカード・結合ページ順・完了表示）
 │   └── pdfEdit/
 │       ├── ContentEditPanel.tsx    # 既存コンテンツ編集パネル
+│       ├── DraftResumeBanner.tsx   # 前回の下書き再開バナー
+│       ├── PdfLoadErrorPanel.tsx   # PDF読み込みエラー表示
+│       ├── PdfPasswordForm.tsx     # パスワード付きPDFの入力フォーム
 │       ├── RecipeManager.tsx       # 作業レシピの保存・読込・適用
 │       ├── TextBoxEditor.tsx       # テキストボックス設定パネル
 │       ├── HeaderFooterEditor.tsx  # ヘッダー/フッター設定パネル
