@@ -20,6 +20,7 @@ import { PdfEditorSidebar, type EditorSubTab } from './pdfEdit/PdfEditorSidebar'
 import { PdfEditorPreview } from './pdfEdit/PdfEditorPreview';
 import { GraphicsOverlay } from './pdfEdit/GraphicsOverlay';
 import { PdfTextSearch } from './pdfEdit/PdfTextSearch';
+import { DocumentPropertiesEditor } from './pdfEdit/DocumentPropertiesEditor';
 import { DEFAULT_WATERMARK, type PdfGraphic, type WatermarkConfig } from '../types/pdfGraphics';
 import { remapGraphicsForPages, duplicateGraphicsForPages } from '../utils/pdfGraphics';
 import { rotateGraphicsToPagePlan } from '../utils/pageGraphicRotation';
@@ -73,18 +74,28 @@ import {
   type StoredPdfDraft,
 } from '../utils/draftStorage';
 import type { PdfEditRecipe } from '../types/recipe';
-import { downloadDataUrlsAsZip, sanitizeFilename } from '../utils/download';
+import { downloadBinaryFilesAsZip, downloadDataUrlsAsZip, sanitizeFilename } from '../utils/download';
+import { parsePageSpec, splitPartFilename, splitPdf } from '../utils/pageSpec';
+import {
+  applyPdfMetadata,
+  EMPTY_PDF_METADATA,
+  isSameMetadata,
+  readPdfInfo,
+  type PdfDocumentMetadata,
+} from '../utils/pdfMetadata';
 import {
   consumePendingPdf,
   peekPendingPdf,
   subscribePdfEditorHandoff,
 } from '../utils/workflowHandoff';
 
-type RedactionFailureOperation = 'save' | 'extract-range' | 'extract-selected' | 'export-images';
+type RedactionFailureOperation = 'save' | 'extract-range' | 'extract-selected' | 'split' | 'export-images';
 
 interface RedactionFailureState {
   error: RedactionVerificationError;
   operation: RedactionFailureOperation;
+  /** 分割の再試行に使うページグループ */
+  splitGroups?: number[][];
 }
 
 function formatBytes(bytes: number) {
@@ -158,6 +169,10 @@ export default function PdfEditor() {
   const [extractEnd, setExtractEnd] = useState('');
 
   const [isSavingPdf, setIsSavingPdf] = useState(false);
+  const [isSplitting, setIsSplitting] = useState(false);
+  const [docMetadata, setDocMetadata] = useState<PdfDocumentMetadata>(EMPTY_PDF_METADATA);
+  const [originalMetadata, setOriginalMetadata] = useState<PdfDocumentMetadata>(EMPTY_PDF_METADATA);
+  const savedMetadataRef = useRef<PdfDocumentMetadata>(EMPTY_PDF_METADATA);
   const [isRotatingPages, setIsRotatingPages] = useState(false);
   const [isExportingPng, setIsExportingPng] = useState(false);
   const [pngProgress, setPngProgress] = useState(0);
@@ -245,7 +260,32 @@ export default function PdfEditor() {
   const resetHistory = history.reset;
 
   const snapshotSignature = JSON.stringify(editSnapshot);
-  const isDirty = Boolean(pdfFile) && savedSignatureRef.current !== snapshotSignature;
+  // 下書きの自動保存は編集スナップショットだけを対象にし、未保存警告には文書情報の変更も含める。
+  const isSnapshotDirty = Boolean(pdfFile) && savedSignatureRef.current !== snapshotSignature;
+  const isDirty = isSnapshotDirty || (Boolean(pdfFile) && !isSameMetadata(docMetadata, savedMetadataRef.current));
+  const isMetadataChanged = !isSameMetadata(docMetadata, originalMetadata);
+
+  useEffect(() => {
+    if (!pdfBytes) {
+      setDocMetadata(EMPTY_PDF_METADATA);
+      setOriginalMetadata(EMPTY_PDF_METADATA);
+      savedMetadataRef.current = EMPTY_PDF_METADATA;
+      return;
+    }
+    let cancelled = false;
+    readPdfInfo(pdfBytes)
+      .then(({ title, author, subject, keywords }) => ({ title, author, subject, keywords }))
+      .catch(() => EMPTY_PDF_METADATA)
+      .then((metadata) => {
+        if (cancelled) return;
+        setDocMetadata(metadata);
+        setOriginalMetadata(metadata);
+        savedMetadataRef.current = metadata;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pdfBytes]);
 
   useEffect(() => {
     pageEntriesRef.current = pageEntries;
@@ -508,7 +548,7 @@ export default function PdfEditor() {
   useEffect(() => {
     if (
       !autoSaveEnabled ||
-      !isDirty ||
+      !isSnapshotDirty ||
       hasRedactions ||
       !pdfFile ||
       loadedFile !== pdfFile ||
@@ -554,7 +594,7 @@ export default function PdfEditor() {
       cancelled = true;
       window.clearTimeout(timeout);
     };
-  }, [activeSubTab, autoSaveEnabled, currentPage, editSnapshot, hasRedactions, imageExportOptions, isDirty, loadedFile, pageEntries.length, pdf, pdfBytes, pdfFile, scale, snapshotSignature]);
+  }, [activeSubTab, autoSaveEnabled, currentPage, editSnapshot, hasRedactions, imageExportOptions, isSnapshotDirty, loadedFile, pageEntries.length, pdf, pdfBytes, pdfFile, scale, snapshotSignature]);
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -566,13 +606,24 @@ export default function PdfEditor() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [isDirty]);
 
+  const savePdfShortcutRef = useRef<(() => void) | null>(null);
+
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      // 別のタブを表示中（編集画面が hidden）のときは反応しない。
+      const preview = containerRef.current;
+      if (!preview || preview.closest('[hidden]')) return;
+      const key = event.key.toLowerCase();
+      if (key === 's' && !event.shiftKey) {
+        event.preventDefault();
+        savePdfShortcutRef.current?.();
+        return;
+      }
       const target = event.target as HTMLElement | null;
       const isTextInput = target?.matches('input, textarea, [contenteditable="true"]');
       if (isTextInput) return;
-      if (event.key.toLowerCase() !== 'z') return;
+      if (key !== 'z') return;
       event.preventDefault();
       if (event.shiftKey) history.redo();
       else history.undo();
@@ -816,6 +867,17 @@ export default function PdfEditor() {
     )));
   };
 
+  const selectPagesBySpec = (spec: string): string | null => {
+    try {
+      const pageIndices = parsePageSpec(spec, displayPageCount);
+      setSelectedPages(new Set(pageIndices));
+      setSelectionAnchor(pageIndices[0] ?? null);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'ページ指定が正しくありません';
+    }
+  };
+
   const deleteSelectedPages = () => {
     if (selectedPages.size === 0) return;
     if (selectedPages.size === displayPageCount) {
@@ -965,16 +1027,24 @@ export default function PdfEditor() {
   };
 
   // 保存・抽出・画像出力は共通パイプライン（バッチ処理・CLIと同一の適用順序）を使う。
-  const buildEditedPdf = useCallback(async (allowCoverOnly = false) => {
+  // includeMetadata が false の場合（抽出・分割・画像出力）は文書情報を書き込まない。
+  const buildEditedPdf = useCallback(async (allowCoverOnly = false, includeMetadata = true) => {
     if (!pdfBytes || !pdfFile) {
       throw new Error('PDFが読み込まれていません');
     }
     return runEditPipeline(
       pdfBytes,
       { pageEntries, textBoxes, headerFooter, pageNumbering, contentEdits, graphics, watermark },
-      { fileName: pdfFile.name, originalPageCount: originalTotalPages, allowCoverOnly },
+      {
+        fileName: pdfFile.name,
+        originalPageCount: originalTotalPages,
+        allowCoverOnly,
+        metadata: includeMetadata && isMetadataChanged ? docMetadata : undefined,
+      },
     );
   }, [
+    docMetadata,
+    isMetadataChanged,
     graphics,
     watermark,
     pdfBytes,
@@ -986,6 +1056,11 @@ export default function PdfEditor() {
     pageNumbering,
     contentEdits,
   ]);
+
+  // 抽出・分割で作る新しいPDFには文書情報が無いため、現在の文書情報を引き継ぐ。
+  const withDocumentMetadata = useCallback(async (bytes: Uint8Array) => (
+    isSameMetadata(docMetadata, EMPTY_PDF_METADATA) ? bytes : applyPdfMetadata(bytes, docMetadata)
+  ), [docMetadata]);
 
   const handleExtract = async (allowCoverOnly = false) => {
     if (!pdfFile) return;
@@ -1005,11 +1080,11 @@ export default function PdfEditor() {
     }
 
     try {
-      const editedPdf = await buildEditedPdf(allowCoverOnly);
-      const extractedPdf = await extractPdfPageIndices(
+      const editedPdf = await buildEditedPdf(allowCoverOnly, false);
+      const extractedPdf = await withDocumentMetadata(await extractPdfPageIndices(
         editedPdf,
         Array.from({ length: end - start + 1 }, (_, index) => start - 1 + index),
-      );
+      ));
       downloadPdf(extractedPdf, `${pdfFile.name.replace('.pdf', '')}_pages_${start}-${end}.pdf`);
       setRedactionFailure(null);
     } catch (err) {
@@ -1026,9 +1101,9 @@ export default function PdfEditor() {
     if (selectedPages.size === 0) return;
     setOutputError(null);
     try {
-      const editedPdf = await buildEditedPdf(allowCoverOnly);
+      const editedPdf = await buildEditedPdf(allowCoverOnly, false);
       const pageIndices = [...selectedPages].sort((a, b) => a - b);
-      const extractedPdf = await extractPdfPageIndices(editedPdf, pageIndices);
+      const extractedPdf = await withDocumentMetadata(await extractPdfPageIndices(editedPdf, pageIndices));
       downloadPdf(extractedPdf, `${sanitizeFilename(pdfOutputName, 'selected-pages')}_selected.pdf`);
       setRedactionFailure(null);
       setOutputMessage(`${pageIndices.length}ページを抽出しました`);
@@ -1039,6 +1114,34 @@ export default function PdfEditor() {
       } else {
         setOutputError(error instanceof Error ? error.message : '選択ページを抽出できませんでした');
       }
+    }
+  };
+
+  const handleSplit = async (groups: number[][], allowCoverOnly = false) => {
+    if (!pdfFile || groups.length === 0) return;
+    setIsSplitting(true);
+    setOutputError(null);
+    setOutputMessage(null);
+    try {
+      const editedPdf = await buildEditedPdf(allowCoverOnly, false);
+      const parts = await splitPdf(editedPdf, groups);
+      const baseName = sanitizeFilename(pdfOutputName, 'split');
+      const files = await Promise.all(parts.map(async (part, index) => ({
+        filename: splitPartFilename(baseName, part, index, parts.length),
+        data: await withDocumentMetadata(part.bytes),
+      })));
+      const zipSize = await downloadBinaryFilesAsZip(files, `${baseName}_split`);
+      setRedactionFailure(null);
+      setOutputMessage(`${parts.length}ファイルに分割し、ZIP（${formatBytes(zipSize)}）で保存しました`);
+    } catch (error) {
+      console.error(error);
+      if (error instanceof RedactionVerificationError) {
+        setRedactionFailure({ error, operation: 'split', splitGroups: groups });
+      } else {
+        setOutputError('分割中にエラーが発生しました: ' + (error instanceof Error ? error.message : '不明なエラー'));
+      }
+    } finally {
+      setIsSplitting(false);
     }
   };
 
@@ -1055,6 +1158,7 @@ export default function PdfEditor() {
       await deletePdfDraft();
       downloadPdf(result, filename);
       savedSignatureRef.current = snapshotSignature;
+      savedMetadataRef.current = docMetadata;
       setAvailableDraft(null);
       setDraftSavedAt(null);
       setDraftStatus('idle');
@@ -1074,6 +1178,10 @@ export default function PdfEditor() {
     }
   };
 
+  useEffect(() => {
+    savePdfShortcutRef.current = isSavingPdf || isExportingPng || isSplitting ? null : () => void handleSavePdf();
+  });
+
   const handleExportPng = async (allowCoverOnly = false) => {
     if (!pdfFile) return;
 
@@ -1086,7 +1194,7 @@ export default function PdfEditor() {
     exportAbortRef.current = controller;
 
     try {
-      const result = await buildEditedPdf(allowCoverOnly);
+      const result = await buildEditedPdf(allowCoverOnly, false);
       let pageIndices: number[] | undefined;
       if (imageExportOptions.pageMode === 'selected') {
         pageIndices = [...selectedPages].sort((a, b) => a - b);
@@ -1143,6 +1251,9 @@ export default function PdfEditor() {
         break;
       case 'extract-selected':
         await handleExtractSelected(true);
+        break;
+      case 'split':
+        await handleSplit(redactionFailure.splitGroups ?? [], true);
         break;
       case 'export-images':
         await handleExportPng(true);
@@ -1388,6 +1499,11 @@ export default function PdfEditor() {
             <span>.pdf</span>
           </div>
         </label>
+        <DocumentPropertiesEditor
+          metadata={docMetadata}
+          originalMetadata={originalMetadata}
+          onChange={setDocMetadata}
+        />
         <details className="relative">
           <summary className="cursor-pointer rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-700">操作履歴 ({history.entries.length})</summary>
           <ol className="absolute right-0 z-40 mt-1 max-h-60 w-64 overflow-auto rounded-lg border border-gray-200 bg-white p-2 shadow-xl">
@@ -1431,6 +1547,7 @@ export default function PdfEditor() {
         onCancelThumbnails={cancelThumbnailGeneration}
         onToggleSelectAll={toggleSelectAll}
         onSelectPattern={selectPagePattern}
+        onSelectSpec={selectPagesBySpec}
         onDeleteSelectedPages={deleteSelectedPages}
         onRotateSelectedPages={rotateSelectedPages}
         isRotatingPages={isRotatingPages}
@@ -1441,6 +1558,8 @@ export default function PdfEditor() {
         onExtractEndChange={setExtractEnd}
         onExtract={() => void handleExtract()}
         onExtractSelected={() => void handleExtractSelected()}
+        onSplit={(groups) => void handleSplit(groups)}
+        isSplitting={isSplitting}
         onDragStart={handleDragStart}
         onDragOver={handleDragOver}
         onDragEnd={handleDragEnd}
@@ -1502,6 +1621,7 @@ export default function PdfEditor() {
           onPageInputKeyDown={handlePageInputKeyDown}
           onPrevPage={() => setCurrentPage((page) => Math.max(1, page - 1))}
           onNextPage={() => setCurrentPage((page) => Math.min(displayPageCount, page + 1))}
+          onGoToPage={(page) => setCurrentPage(Math.min(displayPageCount, Math.max(1, page)))}
           scale={scale}
           onZoomOut={() => setScale((value) => Math.max(0.25, value - 0.25))}
           onZoomIn={() => setScale((value) => Math.min(3, value + 0.25))}

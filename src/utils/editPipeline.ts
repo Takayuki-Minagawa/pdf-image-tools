@@ -6,6 +6,7 @@
  *   2. 既存コンテンツ編集（置換・削除・完全削除・スタイル変更）
  *   3. テキストボックス・ヘッダー/フッター・ページ番号
  *   4. 図形・画像・サイン・透かし
+ *   5. 文書情報（タイトル・作成者など。指定した場合のみ）
  */
 import type { ContentEdit } from '../types/contentEdit';
 import type {
@@ -20,6 +21,7 @@ import { applyContentEdits, RedactionVerificationError } from './contentEditOper
 import { applyPdfEdits, hasTextEdits } from './pdfEditOperations';
 import { buildPdfFromPagePlan, copyPdfBytes } from './pdfEditor';
 import { applyPdfGraphics } from './pdfGraphics';
+import { applyPdfMetadata, type PdfDocumentMetadata } from './pdfMetadata';
 
 export interface PdfEditSnapshot {
   pageEntries: PagePlanEntry[];
@@ -38,6 +40,8 @@ export interface BuildEditedPdfOptions {
   originalPageCount?: number;
   /** 完全削除の事後検証に失敗してもカバーのみで続行する */
   allowCoverOnly?: boolean;
+  /** 書き込む文書情報（省略時は元PDFの文書情報を維持する） */
+  metadata?: Partial<PdfDocumentMetadata>;
 }
 
 export function createIdentityPagePlan(pageCount: number): PagePlanEntry[] {
@@ -108,6 +112,10 @@ export async function buildEditedPdf(
 
   if (snapshot.graphics.length > 0 || snapshot.watermark.enabled) {
     working = await applyPdfGraphics(working, snapshot.graphics, snapshot.watermark);
+  }
+
+  if (options.metadata) {
+    working = await applyPdfMetadata(working, options.metadata);
   }
 
   return copyPdfBytes(working);

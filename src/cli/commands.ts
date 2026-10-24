@@ -11,23 +11,10 @@ import { applyPdfEdits } from '../utils/pdfEditOperations';
 import { applyRecipeToPdf, type ApplyRecipeResult } from '../utils/recipeApply';
 import { inspectPdf, type PdfInspection } from '../utils/pdfInspection';
 import { buildPdfFromPagePlan, extractPdfPageIndices } from '../utils/pdfEditor';
+import { parsePageSpec, planSplitEvery, planSplitRanges, splitPdf, type SplitPdfPart } from '../utils/pageSpec';
+import { applyPdfMetadata, readPdfInfo, type PdfDocumentInfo, type PdfDocumentMetadata } from '../utils/pdfMetadata';
 
-/** `1-3,5,8` 形式（1始まり）を 0 始まりのページインデックス配列へ変換する。 */
-export function parsePageSpec(spec: string, pageCount: number): number[] {
-  const result: number[] = [];
-  for (const part of spec.split(',').map((value) => value.trim()).filter(Boolean)) {
-    const match = /^(\d+)(?:-(\d+))?$/.exec(part);
-    if (!match) throw new Error(`ページ指定が不正です: ${part}`);
-    const start = Number(match[1]);
-    const end = Number(match[2] ?? match[1]);
-    if (start < 1 || end < start || end > pageCount) {
-      throw new Error(`ページ範囲 ${part} は 1〜${pageCount} の外です`);
-    }
-    for (let page = start; page <= end; page++) result.push(page - 1);
-  }
-  if (result.length === 0) throw new Error('ページを1つ以上指定してください');
-  return result;
-}
+export { parsePageSpec };
 
 /** `--key value` / `--flag` 形式の引数を解析する。位置引数は positional に入る。 */
 export function parseArgs(args: string[]): { positional: string[]; options: Record<string, string | true> } {
@@ -106,6 +93,63 @@ export async function rotatePages(input: Uint8Array, spec: string | undefined, d
     sourcePageIndex: index,
     rotation: (targets.has(index) ? normalized : 0) as 0 | 90 | 180 | 270,
   })));
+}
+
+export interface SplitOptions {
+  /** n ページごとに分割 */
+  every?: number;
+  /** `1-3;4-8;9-` 形式（`;` 区切りの各グループが1ファイル） */
+  ranges?: string;
+}
+
+/** 1つのPDFを複数のPDFへ分割する。every と ranges のどちらか一方を指定する。 */
+export async function splitPages(input: Uint8Array, options: SplitOptions): Promise<SplitPdfPart[]> {
+  if ((options.every === undefined) === (options.ranges === undefined)) {
+    throw new Error('split には --every <n> か --ranges <spec> のどちらか一方を指定してください');
+  }
+  const pageCount = (await PDFDocument.load(input, { updateMetadata: false })).getPageCount();
+  const groups = options.ranges !== undefined
+    ? planSplitRanges(options.ranges, pageCount)
+    : planSplitEvery(pageCount, options.every!);
+  return splitPdf(input, groups);
+}
+
+export interface InfoOutput extends PdfDocumentInfo {
+  file: string;
+  pageCount: number;
+  pages: Array<{ pageNumber: number; width: number; height: number; rotation: number }>;
+}
+
+/** ページ数・ページサイズ・文書情報を JSON 向けに返す。 */
+export async function info(input: Uint8Array, fileName: string): Promise<InfoOutput> {
+  const doc = await PDFDocument.load(input, { updateMetadata: false });
+  return {
+    file: fileName,
+    pageCount: doc.getPageCount(),
+    ...(await readPdfInfo(input)),
+    pages: doc.getPages().map((page, index) => {
+      const { width, height } = page.getSize();
+      return { pageNumber: index + 1, width: round(width), height: round(height), rotation: page.getRotation().angle };
+    }),
+  };
+}
+
+export function metadataOptionsFromArgs(options: Record<string, string | true>): Partial<PdfDocumentMetadata> {
+  const metadata: Partial<PdfDocumentMetadata> = {};
+  for (const key of ['title', 'author', 'subject', 'keywords'] as const) {
+    const value = options[key];
+    if (value === true) metadata[key] = '';
+    else if (value !== undefined) metadata[key] = value;
+  }
+  if (Object.keys(metadata).length === 0) {
+    throw new Error('set-metadata には --title / --author / --subject / --keywords のいずれかを指定してください');
+  }
+  return metadata;
+}
+
+/** 文書情報を書き換える。値なしで指定した項目（例: `--author`）は削除する。 */
+export async function setMetadata(input: Uint8Array, metadata: Partial<PdfDocumentMetadata>): Promise<Uint8Array> {
+  return applyPdfMetadata(input, metadata);
 }
 
 export interface AddTextOptions {

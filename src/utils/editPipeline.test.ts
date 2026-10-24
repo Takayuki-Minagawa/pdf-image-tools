@@ -101,4 +101,22 @@ describe('buildEditedPdf', () => {
     const after = await inspectPdf(output);
     expect(pageTexts(after).every((texts) => texts.includes('DRAFT'))).toBe(true);
   });
+
+  it('writes document properties last when requested', async () => {
+    const source = await createSource();
+    const plan = createIdentityPagePlan(2);
+    const output = await buildEditedPdf(source, {
+      pageEntries: [plan[1]],
+      textBoxes: [],
+      headerFooter: DEFAULT_HEADER_FOOTER,
+      pageNumbering: DEFAULT_PAGE_NUMBERING,
+      contentEdits: [],
+      graphics: [],
+      watermark: DEFAULT_WATERMARK,
+    }, { fileName: 'source.pdf', metadata: { title: '抜粋', author: '' } });
+    const doc = await PDFDocument.load(output);
+    expect(doc.getPageCount()).toBe(1);
+    expect(doc.getTitle()).toBe('抜粋');
+    expect(doc.getAuthor()).toBeUndefined();
+  });
 });

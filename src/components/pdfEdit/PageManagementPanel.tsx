@@ -1,17 +1,28 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   Copy,
   Download,
+  FileStack,
   GripVertical,
   LayoutGrid,
   Plus,
   RotateCcw,
   RotateCw,
   Scissors,
+  Split,
   Trash2,
   X,
 } from 'lucide-react';
 import type { PagePlanEntry } from '../../types/pdfEdit';
+import { formatPageSpec, planSplitBefore, planSplitEvery, planSplitRanges } from '../../utils/pageSpec';
+
+export type SplitMode = 'every' | 'ranges' | 'selected';
+
+const SPLIT_MODE_LABELS: Record<SplitMode, string> = {
+  every: 'Nページごと',
+  ranges: '範囲を指定',
+  selected: '選択ページの前で区切る',
+};
 
 interface PageManagementPanelProps {
   displayPageCount: number;
@@ -28,6 +39,8 @@ interface PageManagementPanelProps {
   onCancelThumbnails?: () => void;
   onToggleSelectAll: () => void;
   onSelectPattern: (pattern: 'odd' | 'even' | 'none') => void;
+  /** `1-3,5` 形式でページを選択する。エラー時はメッセージを返す */
+  onSelectSpec: (spec: string) => string | null;
   onDeleteSelectedPages: () => void;
   onRotateSelectedPages: () => void;
   isRotatingPages?: boolean;
@@ -38,6 +51,8 @@ interface PageManagementPanelProps {
   onExtractEndChange: (value: string) => void;
   onExtract: () => void;
   onExtractSelected: () => void;
+  onSplit: (groups: number[][]) => void;
+  isSplitting?: boolean;
   onDragStart: (displayIndex: number) => void;
   onDragOver: (e: React.DragEvent, displayIndex: number) => void;
   onDragEnd: () => void;
@@ -106,6 +121,7 @@ export function PageManagementPanel({
   onCancelThumbnails,
   onToggleSelectAll,
   onSelectPattern,
+  onSelectSpec,
   onDeleteSelectedPages,
   onRotateSelectedPages,
   isRotatingPages = false,
@@ -116,12 +132,41 @@ export function PageManagementPanel({
   onExtractEndChange,
   onExtract,
   onExtractSelected,
+  onSplit,
+  isSplitting = false,
   onDragStart,
   onDragOver,
   onDragEnd,
   onMovePage,
   onTogglePageSelection,
 }: PageManagementPanelProps) {
+  const idPrefix = useId();
+  const [selectSpec, setSelectSpec] = useState('');
+  const [selectSpecError, setSelectSpecError] = useState<string | null>(null);
+  const [splitMode, setSplitMode] = useState<SplitMode>('every');
+  const [splitEvery, setSplitEvery] = useState('1');
+  const [splitRanges, setSplitRanges] = useState('');
+
+  const splitPlan = useMemo((): { groups: number[][]; error: null } | { groups: null; error: string } => {
+    try {
+      if (splitMode === 'every') {
+        return { groups: planSplitEvery(displayPageCount, Number(splitEvery)), error: null };
+      }
+      if (splitMode === 'ranges') {
+        return { groups: planSplitRanges(splitRanges, displayPageCount), error: null };
+      }
+      if (selectedPages.size === 0) return { groups: null, error: '区切りにするページを選択してください' };
+      return { groups: planSplitBefore(displayPageCount, [...selectedPages]), error: null };
+    } catch (error) {
+      return { groups: null, error: error instanceof Error ? error.message : '分割方法が正しくありません' };
+    }
+  }, [displayPageCount, selectedPages, splitEvery, splitMode, splitRanges]);
+
+  const applySelectSpec = () => {
+    const error = onSelectSpec(selectSpec);
+    setSelectSpecError(error);
+  };
+
   return (
     <section className="rounded-xl border border-gray-200" aria-labelledby="page-editor-title">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-4 py-3">
@@ -140,10 +185,35 @@ export function PageManagementPanel({
           </button>
           <details className="relative">
             <summary className="cursor-pointer rounded-lg bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm ring-1 ring-gray-200">選択方法</summary>
-            <div className="absolute right-0 z-30 mt-1 w-36 rounded-lg border border-gray-200 bg-white p-1 shadow-xl">
+            <div className="absolute right-0 z-30 mt-1 w-56 rounded-lg border border-gray-200 bg-white p-1 shadow-xl">
               <button type="button" onClick={() => onSelectPattern('odd')} className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-gray-50">奇数ページ</button>
               <button type="button" onClick={() => onSelectPattern('even')} className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-gray-50">偶数ページ</button>
               <button type="button" onClick={() => onSelectPattern('none')} className="flex w-full items-center gap-1 rounded px-3 py-2 text-left text-sm hover:bg-gray-50"><X className="h-3.5 w-3.5" />選択解除</button>
+              <form
+                className="border-t border-gray-100 px-2 pb-1 pt-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  applySelectSpec();
+                }}
+              >
+                <label htmlFor={`${idPrefix}-select-spec`} className="text-xs text-gray-600">ページ番号で選択</label>
+                <div className="mt-1 flex gap-1">
+                  <input
+                    id={`${idPrefix}-select-spec`}
+                    value={selectSpec}
+                    onChange={(event) => {
+                      setSelectSpec(event.target.value);
+                      setSelectSpecError(null);
+                    }}
+                    placeholder="例: 1-3,5,8-"
+                    aria-invalid={selectSpecError !== null}
+                    aria-describedby={selectSpecError ? `${idPrefix}-select-spec-error` : undefined}
+                    className="min-w-0 flex-1 rounded border border-gray-300 px-2 py-1 text-sm"
+                  />
+                  <button type="submit" disabled={!selectSpec.trim()} className="rounded bg-amber-500 px-2 py-1 text-xs font-medium text-white hover:bg-amber-600 disabled:opacity-50">選択</button>
+                </div>
+                {selectSpecError && <p id={`${idPrefix}-select-spec-error`} className="mt-1 text-xs text-red-600">{selectSpecError}</p>}
+              </form>
             </div>
           </details>
           <button type="button" onClick={onRotateSelectedPages} disabled={selectedPages.size === 0 || isRotatingPages} className="flex items-center gap-1 rounded-lg bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-40">
@@ -180,6 +250,69 @@ export function PageManagementPanel({
         <button type="button" onClick={onExtractSelected} disabled={selectedPages.size === 0} className="flex items-center gap-2 rounded-lg border border-purple-300 bg-white px-3 py-1.5 text-sm text-purple-700 hover:bg-purple-50 disabled:opacity-50">
           <Download className="h-4 w-4" />選択ページを抽出
         </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 border-b border-gray-200 bg-gray-50 px-4 py-3">
+        <Split className="h-5 w-5 text-teal-600" aria-hidden="true" />
+        <span className="text-sm font-medium text-teal-700">分割</span>
+        <label className="sr-only" htmlFor={`${idPrefix}-split-mode`}>分割方法</label>
+        <select
+          id={`${idPrefix}-split-mode`}
+          value={splitMode}
+          onChange={(event) => setSplitMode(event.target.value as SplitMode)}
+          className="rounded-lg border border-teal-300 bg-white px-2 py-1 text-sm"
+        >
+          {(Object.keys(SPLIT_MODE_LABELS) as SplitMode[]).map((mode) => (
+            <option key={mode} value={mode}>{SPLIT_MODE_LABELS[mode]}</option>
+          ))}
+        </select>
+        {splitMode === 'every' && (
+          <label className="flex items-center gap-1 text-sm text-gray-600">
+            <input
+              type="number"
+              min={1}
+              max={Math.max(1, displayPageCount)}
+              value={splitEvery}
+              onChange={(event) => setSplitEvery(event.target.value)}
+              className="w-16 rounded-lg border border-teal-300 px-2 py-1 text-sm"
+            />
+            ページごと
+          </label>
+        )}
+        {splitMode === 'ranges' && (
+          <>
+            <label className="sr-only" htmlFor={`${idPrefix}-split-ranges`}>分割するページ範囲</label>
+            <input
+              id={`${idPrefix}-split-ranges`}
+              value={splitRanges}
+              onChange={(event) => setSplitRanges(event.target.value)}
+              placeholder="例: 1-3; 4-8; 9-"
+              className="min-w-40 flex-1 rounded-lg border border-teal-300 px-2 py-1 text-sm"
+            />
+          </>
+        )}
+        {splitMode === 'selected' && (
+          <span className="text-xs text-gray-500">
+            {selectedPages.size > 0
+              ? `${formatPageSpec([...selectedPages].sort((a, b) => a - b))} ページ目から新しいファイル`
+              : '新しいファイルを始めるページを選択'}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={() => splitPlan.groups && onSplit(splitPlan.groups)}
+          disabled={!splitPlan.groups || splitPlan.groups.length < 2 || isSplitting}
+          className="flex items-center gap-2 rounded-lg bg-teal-600 px-3 py-1.5 text-sm text-white hover:bg-teal-700 disabled:opacity-50"
+        >
+          <FileStack className="h-4 w-4" />
+          {isSplitting ? '分割中…' : 'ZIPで保存'}
+        </button>
+        <span className={`text-xs ${splitPlan.error ? 'text-red-600' : 'text-gray-500'}`} aria-live="polite">
+          {splitPlan.error
+            ?? (splitPlan.groups.length < 2
+              ? '2ファイル以上になるように指定してください'
+              : `${splitPlan.groups.length}ファイル（${splitPlan.groups.slice(0, 4).map(formatPageSpec).join(' / ')}${splitPlan.groups.length > 4 ? ' …' : ''}）`)}
+        </span>
       </div>
 
       {isGeneratingThumbnails && (
@@ -227,7 +360,7 @@ export function PageManagementPanel({
             </div>
           ))}
         </div>
-        <p className="mt-2 text-xs text-gray-500">Alt + ←/→でページ移動、Shift + 選択で範囲選択できます。</p>
+        <p className="mt-2 text-xs text-gray-500">Alt + ←/→でページ移動、Shift + 選択で範囲選択できます。「選択方法」からページ番号（例: 1-3,5）でも選択できます。</p>
       </div>
     </section>
   );

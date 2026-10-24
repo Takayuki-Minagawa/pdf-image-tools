@@ -10,6 +10,7 @@ interface PdfEditorPreviewProps {
   onPageInputKeyDown: (e: KeyboardEvent<HTMLInputElement>) => void;
   onPrevPage: () => void;
   onNextPage: () => void;
+  onGoToPage: (page: number) => void;
   scale: number;
   onZoomOut: () => void;
   onZoomIn: () => void;
@@ -35,6 +36,7 @@ export function PdfEditorPreview({
   onPageInputKeyDown,
   onPrevPage,
   onNextPage,
+  onGoToPage,
   scale,
   onZoomOut,
   onZoomIn,
@@ -48,6 +50,27 @@ export function PdfEditorPreview({
   pageSize,
   graphicsOverlay,
 }: PdfEditorPreviewProps) {
+  // プレビュー領域にフォーカスがあるときだけ、ページ移動とズームをキーボードで操作する。
+  // 図形オーバーレイなど子要素のキー操作（矢印での移動）とは競合させない。
+  const handlePreviewKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget || event.ctrlKey || event.metaKey || event.altKey) return;
+    const actions: Record<string, () => void> = {
+      ArrowLeft: onPrevPage,
+      PageUp: onPrevPage,
+      ArrowRight: onNextPage,
+      PageDown: onNextPage,
+      Home: () => onGoToPage(1),
+      End: () => onGoToPage(displayPageCount),
+      '+': onZoomIn,
+      '=': onZoomIn,
+      '-': onZoomOut,
+    };
+    const action = actions[event.key];
+    if (!action) return;
+    event.preventDefault();
+    action();
+  };
+
   return (
     <div className="min-w-0 flex-1 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-gray-100 p-3">
@@ -121,8 +144,12 @@ export function PdfEditorPreview({
 
       <div
         ref={containerRef}
+        role="region"
+        tabIndex={0}
+        onKeyDown={handlePreviewKeyDown}
         aria-label={`PDFプレビュー ${currentPage}/${displayPageCount}ページ`}
-        className="max-h-[600px] overflow-auto rounded-lg bg-gray-200 p-4"
+        aria-describedby="pdf-preview-shortcuts"
+        className="max-h-[600px] overflow-auto rounded-lg bg-gray-200 p-4 outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
       >
         <div className="flex min-w-fit justify-center">
           <div className="relative inline-block">
@@ -148,6 +175,9 @@ export function PdfEditorPreview({
         ページサイズ: {Math.round(pageSize.width)} x {Math.round(pageSize.height)} pt |
         ズーム: {Math.round(scale * 100)}%
       </div>
+      <p id="pdf-preview-shortcuts" className="text-center text-xs text-gray-400">
+        プレビューを選択して ←/→・PageUp/PageDown でページ移動、Home/End で先頭/最終ページ、+/− でズーム。Ctrl（⌘）+ S で保存。
+      </p>
     </div>
   );
 }
