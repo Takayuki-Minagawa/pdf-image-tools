@@ -1,165 +1,42 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { DragEvent } from 'react';
 import { PDFDocument } from 'pdf-lib';
-import * as pdfjsLib from 'pdfjs-dist';
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import {
   AlertTriangle,
   ArrowDownUp,
   Ban,
-  CheckCircle2,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  ChevronUp,
   Combine,
-  Download,
-  FileText,
-  GripVertical,
-  Layers,
   LoaderCircle,
-  RotateCcw,
-  Shuffle,
   Trash2,
   Upload,
-  XCircle,
 } from 'lucide-react';
+import { MergeCompletionPanel, type MergeCompletion } from './pdfMerge/MergeCompletionPanel';
+import { MergeFileCard } from './pdfMerge/MergeFileCard';
+import { MergePageOrder } from './pdfMerge/MergePageOrder';
+import { moveItem } from '../utils/arrayUtils';
+import { nextFrame, throwIfAborted } from '../utils/async';
 import {
   classifyPdfLoadError,
-  formatBytes,
   interleavePages,
-  moveItem,
   regroupPagesByFile,
   sanitizePdfFilename,
-  validatePdfFile,
 } from '../utils/pdfMergeUtils';
-import type { PdfLoadErrorInfo } from '../utils/pdfMergeUtils';
-import { sendPdfToEditor } from '../utils/workflowHandoff';
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+import {
+  isPageOfFile,
+  loadPdfFile,
+  newLoadingEntry,
+  type LoadedPdf,
+  type MergePage,
+  type PdfFileEntry,
+} from '../utils/pdfMergeLoader';
 
 const MAX_MERGE_FILES = 50;
 const MAX_MERGE_TOTAL_BYTES = 500 * 1024 * 1024;
-
-type LoadStatus = 'loading' | 'ready' | 'error';
-
-interface MergePage {
-  id: string;
-  fileId: string;
-  sourcePageIndex: number;
-  thumbnail: string;
-  excluded: boolean;
-}
-
-interface PdfFileEntry {
-  id: string;
-  file: File;
-  name: string;
-  status: LoadStatus;
-  bytes?: ArrayBuffer;
-  signature?: string;
-  pageCount?: number;
-  thumbnail?: string;
-  pages: MergePage[];
-  error?: PdfLoadErrorInfo;
-  duplicateOf?: string;
-}
-
-interface LoadedPdf {
-  bytes: ArrayBuffer;
-  signature: string;
-  pageCount: number;
-  thumbnail: string;
-  pages: MergePage[];
-}
 
 interface MergeProgress {
   current: number;
   total: number;
   label: string;
-}
-
-interface MergeCompletion {
-  url: string;
-  blob: Blob;
-  filename: string;
-  pageCount: number;
-  byteLength: number;
-  elapsedMs: number;
-}
-
-function throwIfAborted(signal: AbortSignal): void {
-  if (signal.aborted) throw new DOMException('Operation cancelled', 'AbortError');
-}
-
-async function createSignature(bytes: ArrayBuffer): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', bytes.slice(0));
-  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
-}
-
-async function loadPdfFile(fileId: string, file: File, signal: AbortSignal): Promise<LoadedPdf> {
-  validatePdfFile(file);
-  throwIfAborted(signal);
-
-  const sourceBytes = await file.arrayBuffer();
-  const bytes = sourceBytes.slice(0);
-  const signaturePromise = createSignature(bytes);
-  throwIfAborted(signal);
-
-  const loadingTask = pdfjsLib.getDocument({ data: sourceBytes });
-  const abortLoading = () => {
-    void loadingTask.destroy();
-  };
-  signal.addEventListener('abort', abortLoading, { once: true });
-
-  try {
-    const pdf = await loadingTask.promise;
-    const pages: MergePage[] = [];
-    try {
-      for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-        throwIfAborted(signal);
-        const page = await pdf.getPage(pageNumber);
-        const baseViewport = page.getViewport({ scale: 1 });
-        const scale = Math.min(0.3, 150 / Math.max(baseViewport.width, 1));
-        const viewport = page.getViewport({ scale });
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
-        if (!context) throw new Error('Canvas context is unavailable');
-        canvas.width = Math.max(1, Math.ceil(viewport.width));
-        canvas.height = Math.max(1, Math.ceil(viewport.height));
-        await page.render({ canvas, canvasContext: context, viewport }).promise;
-        pages.push({
-          id: `${fileId}-page-${pageNumber}`,
-          fileId,
-          sourcePageIndex: pageNumber - 1,
-          thumbnail: canvas.toDataURL('image/jpeg', 0.76),
-          excluded: false,
-        });
-        page.cleanup();
-      }
-    } finally {
-      await pdf.destroy();
-    }
-    throwIfAborted(signal);
-    return {
-      bytes,
-      signature: await signaturePromise,
-      pageCount: pages.length,
-      thumbnail: pages[0]?.thumbnail ?? '',
-      pages,
-    };
-  } finally {
-    signal.removeEventListener('abort', abortLoading);
-  }
-}
-
-function newLoadingEntry(file: File): PdfFileEntry {
-  return {
-    id: crypto.randomUUID(),
-    file,
-    name: file.name,
-    status: 'loading',
-    pages: [],
-  };
 }
 
 export default function PdfMerger() {
@@ -174,7 +51,6 @@ export default function PdfMerger() {
   const [progress, setProgress] = useState<MergeProgress | null>(null);
   const [completion, setCompletion] = useState<MergeCompletion | null>(null);
   const [draggedFileIndex, setDraggedFileIndex] = useState<number | null>(null);
-  const [draggedPageIndex, setDraggedPageIndex] = useState<number | null>(null);
   const loadAbortRef = useRef<AbortController | null>(null);
   const mergeAbortRef = useRef<AbortController | null>(null);
 
@@ -184,10 +60,11 @@ export default function PdfMerger() {
     return map;
   }, [pdfFiles]);
 
-  const orderedPages = useMemo(
-    () => pageOrder.map((id) => pageById.get(id)).filter((page): page is MergePage => Boolean(page)),
-    [pageById, pageOrder],
+  const resolvePages = useCallback(
+    (ids: readonly string[]) => ids.map((id) => pageById.get(id)).filter((page): page is MergePage => Boolean(page)),
+    [pageById],
   );
+  const orderedPages = useMemo(() => resolvePages(pageOrder), [pageOrder, resolvePages]);
   const activePages = useMemo(() => orderedPages.filter((page) => !page.excluded), [orderedPages]);
   const readyFiles = useMemo(() => pdfFiles.filter((file) => file.status === 'ready'), [pdfFiles]);
   const failedCount = pdfFiles.filter((file) => file.status === 'error').length;
@@ -242,7 +119,7 @@ export default function PdfMerger() {
         } catch (reason) {
           settled.push({ status: 'rejected', reason });
         }
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        await nextFrame();
       }
       const knownSignatures = new Map(
         pdfFiles
@@ -297,7 +174,7 @@ export default function PdfMerger() {
     [isLoading, pdfFiles],
   );
 
-  const handleDrop = (event: React.DragEvent) => {
+  const handleDrop = (event: DragEvent) => {
     event.preventDefault();
     event.stopPropagation();
     void addFiles(Array.from(event.dataTransfer.files));
@@ -334,7 +211,7 @@ export default function PdfMerger() {
         ),
       );
       setPageOrder((current) => [
-        ...current.filter((pageId) => !pageId.startsWith(`${id}-page-`)),
+        ...current.filter((pageId) => !isPageOfFile(pageId, id)),
         ...loaded.pages.map((page) => page.id),
       ]);
       setExpandedFiles((current) => new Set(current).add(id));
@@ -356,7 +233,7 @@ export default function PdfMerger() {
 
   const removeFile = (id: string) => {
     setPdfFiles((current) => current.filter((file) => file.id !== id));
-    setPageOrder((current) => current.filter((pageId) => !pageId.startsWith(`${id}-page-`)));
+    setPageOrder((current) => current.filter((pageId) => !isPageOfFile(pageId, id)));
     setExpandedFiles((current) => {
       const next = new Set(current);
       next.delete(id);
@@ -366,26 +243,17 @@ export default function PdfMerger() {
     setMessage('ファイルを一覧から除外しました。');
   };
 
-  const reorderFiles = (fromIndex: number, toIndex: number) => {
-    const nextFiles = moveItem(pdfFiles, fromIndex, toIndex);
+  // ファイル順を変えたら、結合ページ順もファイル単位にまとめ直す。
+  const applyFileOrder = (nextFiles: PdfFileEntry[]) => {
     setPdfFiles(nextFiles);
-    const order = nextFiles.map((file) => file.id);
-    setPageOrder((current) => {
-      const pages = current.map((id) => pageById.get(id)).filter((page): page is MergePage => Boolean(page));
-      return regroupPagesByFile(pages, order).map((page) => page.id);
-    });
+    const fileOrder = nextFiles.map((file) => file.id);
+    setPageOrder((current) => regroupPagesByFile(resolvePages(current), fileOrder).map((page) => page.id));
     invalidateCompletion();
   };
 
-  const reverseFileOrder = () => {
-    const nextFiles = [...pdfFiles].reverse();
-    setPdfFiles(nextFiles);
-    setPageOrder((current) => {
-      const pages = current.map((id) => pageById.get(id)).filter((page): page is MergePage => Boolean(page));
-      return regroupPagesByFile(pages, nextFiles.map((file) => file.id)).map((page) => page.id);
-    });
-    invalidateCompletion();
-  };
+  const reorderFiles = (fromIndex: number, toIndex: number) => applyFileOrder(moveItem(pdfFiles, fromIndex, toIndex));
+
+  const reverseFileOrder = () => applyFileOrder([...pdfFiles].reverse());
 
   const toggleExpanded = (id: string) => {
     setExpandedFiles((current) => {
@@ -426,10 +294,7 @@ export default function PdfMerger() {
 
   const applyInterleave = () => {
     const fileOrder = readyFiles.map((file) => file.id);
-    setPageOrder((current) => {
-      const pages = current.map((id) => pageById.get(id)).filter((page): page is MergePage => Boolean(page));
-      return interleavePages(pages, fileOrder).map((page) => page.id);
-    });
+    setPageOrder((current) => interleavePages(resolvePages(current), fileOrder).map((page) => page.id));
     invalidateCompletion();
     setMessage('ファイル順に1ページずつ交互に差し込みました。');
   };
@@ -481,9 +346,7 @@ export default function PdfMerger() {
           total: activePages.length,
           label: `${index + 1} / ${activePages.length}ページを処理しました`,
         });
-        if (index % 3 === 0) {
-          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-        }
+        if (index % 3 === 0) await nextFrame();
       }
 
       throwIfAborted(controller.signal);
@@ -617,258 +480,45 @@ export default function PdfMerger() {
           </div>
 
           <ol className="space-y-3" aria-label="PDFファイル一覧">
-            {pdfFiles.map((pdfFile, index) => {
-              const isExpanded = expandedFiles.has(pdfFile.id);
-              const allExcluded = pdfFile.pages.length > 0 && pdfFile.pages.every((page) => page.excluded);
-              return (
-                <li
-                  key={pdfFile.id}
-                  draggable={!isMerging}
-                  onDragStart={() => setDraggedFileIndex(index)}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    if (draggedFileIndex !== null && draggedFileIndex !== index) {
-                      reorderFiles(draggedFileIndex, index);
-                      setDraggedFileIndex(index);
-                    }
-                  }}
-                  onDragEnd={() => setDraggedFileIndex(null)}
-                  className={`rounded-xl border bg-white text-left transition ${
-                    draggedFileIndex === index ? 'border-purple-400 opacity-60' : 'border-gray-200'
-                  }`}
-                >
-                  <div className="flex flex-wrap items-center gap-3 p-3">
-                    <span className="cursor-grab p-1 text-gray-400" aria-hidden="true">
-                      <GripVertical className="h-5 w-5" />
-                    </span>
-                    <span className="flex h-8 w-8 flex-none items-center justify-center rounded-lg bg-purple-100 text-sm font-bold text-purple-700">
-                      {index + 1}
-                    </span>
-                    <div className="h-16 w-12 flex-none overflow-hidden rounded bg-gray-100">
-                      {pdfFile.thumbnail ? (
-                        <img src={pdfFile.thumbnail} alt="" className="h-full w-full object-contain" />
-                      ) : (
-                        <FileText className="m-3 h-6 w-6 text-gray-400" aria-hidden="true" />
-                      )}
-                    </div>
-                    <div className="min-w-40 flex-1">
-                      <p className="truncate font-medium text-gray-800">{pdfFile.name}</p>
-                      <p className="text-sm text-gray-500">
-                        {formatBytes(pdfFile.file.size)}
-                        {pdfFile.pageCount !== undefined && `・${pdfFile.pageCount}ページ`}
-                      </p>
-                      {pdfFile.status === 'loading' && (
-                        <span className="mt-1 inline-flex items-center gap-1 text-sm text-blue-700">
-                          <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" /> 読み込み中
-                        </span>
-                      )}
-                      {pdfFile.status === 'ready' && !pdfFile.duplicateOf && (
-                        <span className="mt-1 inline-flex items-center gap-1 text-sm text-green-700">
-                          <CheckCircle2 className="h-4 w-4" aria-hidden="true" /> 読み込み完了
-                        </span>
-                      )}
-                      {pdfFile.duplicateOf && (
-                        <span className="mt-1 inline-flex items-center gap-1 text-sm font-medium text-amber-700">
-                          <AlertTriangle className="h-4 w-4" aria-hidden="true" /> 「{pdfFile.duplicateOf}」と内容が重複
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => reorderFiles(index, index - 1)}
-                        disabled={index === 0 || isMerging}
-                        className="rounded p-2 hover:bg-gray-100 disabled:opacity-30"
-                        aria-label={`${pdfFile.name}を上へ移動`}
-                      >
-                        <ChevronUp className="h-4 w-4" aria-hidden="true" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => reorderFiles(index, index + 1)}
-                        disabled={index === pdfFiles.length - 1 || isMerging}
-                        className="rounded p-2 hover:bg-gray-100 disabled:opacity-30"
-                        aria-label={`${pdfFile.name}を下へ移動`}
-                      >
-                        <ChevronDown className="h-4 w-4" aria-hidden="true" />
-                      </button>
-                    </div>
-
-                    {pdfFile.status === 'ready' && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => toggleWholeFile(pdfFile.id)}
-                          disabled={isMerging}
-                          className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100"
-                        >
-                          {allExcluded ? '全ページを含める' : '全ページを除外'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => toggleExpanded(pdfFile.id)}
-                          aria-expanded={isExpanded}
-                          aria-controls={`pages-${pdfFile.id}`}
-                          className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-purple-700 hover:bg-purple-50"
-                        >
-                          {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                          ページ
-                        </button>
-                      </>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => removeFile(pdfFile.id)}
-                      disabled={isMerging}
-                      className="rounded-lg p-2 text-red-600 hover:bg-red-50 disabled:opacity-40"
-                      aria-label={`${pdfFile.name}を除外`}
-                    >
-                      <Trash2 className="h-5 w-5" aria-hidden="true" />
-                    </button>
-                  </div>
-
-                  {pdfFile.status === 'error' && pdfFile.error && (
-                    <div className="mx-3 mb-3 flex flex-wrap items-start gap-3 rounded-lg border border-red-200 bg-red-50 p-3" role="alert">
-                      <XCircle className="mt-0.5 h-5 w-5 flex-none text-red-600" aria-hidden="true" />
-                      <div className="min-w-48 flex-1">
-                        <p className="font-medium text-red-800">{pdfFile.error.title}</p>
-                        <p className="text-sm text-red-700">{pdfFile.error.message}</p>
-                        <p className="mt-1 text-sm text-gray-600">{pdfFile.error.suggestion}</p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => void retryFile(pdfFile.id)}
-                        disabled={isLoading}
-                        className="flex items-center gap-1 rounded-lg bg-white px-3 py-2 text-sm font-medium text-red-700 shadow-sm hover:bg-red-100 disabled:opacity-40"
-                      >
-                        <RotateCcw className="h-4 w-4" aria-hidden="true" /> 再試行
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => removeFile(pdfFile.id)}
-                        className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-gray-700 hover:bg-white"
-                      >
-                        <Ban className="h-4 w-4" aria-hidden="true" /> 除外
-                      </button>
-                    </div>
-                  )}
-
-                  {pdfFile.status === 'ready' && isExpanded && (
-                    <div id={`pages-${pdfFile.id}`} className="border-t border-gray-100 p-3">
-                      <ul className="flex gap-3 overflow-x-auto pb-2" aria-label={`${pdfFile.name}のページ`}>
-                        {pdfFile.pages.map((page) => (
-                          <li key={page.id} className={`w-24 flex-none ${page.excluded ? 'opacity-50' : ''}`}>
-                            <button
-                              type="button"
-                              onClick={() => togglePageExcluded(page.id)}
-                              disabled={isMerging}
-                              aria-pressed={page.excluded}
-                              className="w-full rounded-lg border border-gray-200 p-2 text-center hover:border-purple-400 focus-visible:outline-2 focus-visible:outline-purple-600"
-                            >
-                              <img src={page.thumbnail} alt="" className="mx-auto h-24 w-full object-contain" />
-                              <span className="mt-1 block text-xs text-gray-700">
-                                {page.sourcePageIndex + 1}ページ・{page.excluded ? '除外中' : '含める'}
-                              </span>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </li>
-              );
-            })}
+            {pdfFiles.map((pdfFile, index) => (
+              <MergeFileCard
+                key={pdfFile.id}
+                pdfFile={pdfFile}
+                index={index}
+                fileCount={pdfFiles.length}
+                isExpanded={expandedFiles.has(pdfFile.id)}
+                isDragged={draggedFileIndex === index}
+                isLoading={isLoading}
+                isMerging={isMerging}
+                onDragStart={() => setDraggedFileIndex(index)}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  if (draggedFileIndex !== null && draggedFileIndex !== index) {
+                    reorderFiles(draggedFileIndex, index);
+                    setDraggedFileIndex(index);
+                  }
+                }}
+                onDragEnd={() => setDraggedFileIndex(null)}
+                onMove={reorderFiles}
+                onToggleWholeFile={() => toggleWholeFile(pdfFile.id)}
+                onToggleExpanded={() => toggleExpanded(pdfFile.id)}
+                onRemove={() => removeFile(pdfFile.id)}
+                onRetry={() => void retryFile(pdfFile.id)}
+                onTogglePageExcluded={togglePageExcluded}
+              />
+            ))}
           </ol>
 
           {orderedPages.length > 0 && (
-            <section className="space-y-3 rounded-xl border border-purple-200 bg-purple-50/40 p-4" aria-labelledby="page-order-title">
-              <div className="flex flex-wrap items-center justify-between gap-3 text-left">
-                <div>
-                  <h3 id="page-order-title" className="flex items-center gap-2 font-bold text-gray-800">
-                    <Layers className="h-5 w-5 text-purple-600" aria-hidden="true" /> 結合ページ順
-                  </h3>
-                  <p className="text-sm text-gray-600">ファイルをまたいでドラッグできます。Alt＋左右矢印でも移動できます。</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={applyInterleave}
-                  disabled={readyFiles.length < 2 || isMerging}
-                  className="flex items-center gap-2 rounded-lg bg-white px-3 py-2 text-sm font-medium text-purple-700 shadow-sm hover:bg-purple-100 disabled:opacity-40"
-                >
-                  <Shuffle className="h-4 w-4" aria-hidden="true" /> 交互に差し込む
-                </button>
-              </div>
-              <ol className="flex gap-3 overflow-x-auto pb-3" aria-label="結合するページの順番">
-                {orderedPages.map((page, index) => (
-                  <li
-                    key={page.id}
-                    draggable={!isMerging}
-                    tabIndex={0}
-                    onDragStart={() => setDraggedPageIndex(index)}
-                    onDragOver={(event) => {
-                      event.preventDefault();
-                      if (draggedPageIndex !== null && draggedPageIndex !== index) {
-                        reorderPage(draggedPageIndex, index);
-                        setDraggedPageIndex(index);
-                      }
-                    }}
-                    onDragEnd={() => setDraggedPageIndex(null)}
-                    onKeyDown={(event) => {
-                      if (!event.altKey) return;
-                      if (event.key === 'ArrowLeft' && index > 0) {
-                        event.preventDefault();
-                        reorderPage(index, index - 1);
-                      }
-                      if (event.key === 'ArrowRight' && index < orderedPages.length - 1) {
-                        event.preventDefault();
-                        reorderPage(index, index + 1);
-                      }
-                    }}
-                    className={`w-28 flex-none rounded-lg border bg-white p-2 text-center focus-visible:outline-2 focus-visible:outline-purple-600 ${
-                      page.excluded ? 'border-gray-200 opacity-45' : 'border-purple-200'
-                    }`}
-                    aria-label={`${index + 1}番、${getFileName(page.fileId)}の${page.sourcePageIndex + 1}ページ${page.excluded ? '、除外中' : ''}`}
-                  >
-                    <div className="mb-1 flex items-center justify-between">
-                      <button
-                        type="button"
-                        onClick={() => reorderPage(index, index - 1)}
-                        disabled={index === 0 || isMerging}
-                        className="rounded p-1 hover:bg-gray-100 disabled:opacity-20"
-                        aria-label="前へ移動"
-                      >
-                        <ChevronLeft className="h-4 w-4" aria-hidden="true" />
-                      </button>
-                      <span className="text-xs font-bold text-purple-700">{index + 1}</span>
-                      <button
-                        type="button"
-                        onClick={() => reorderPage(index, index + 1)}
-                        disabled={index === orderedPages.length - 1 || isMerging}
-                        className="rounded p-1 hover:bg-gray-100 disabled:opacity-20"
-                        aria-label="次へ移動"
-                      >
-                        <ChevronRight className="h-4 w-4" aria-hidden="true" />
-                      </button>
-                    </div>
-                    <img src={page.thumbnail} alt="" className="h-28 w-full object-contain" />
-                    <p className="mt-1 truncate text-xs text-gray-600" title={getFileName(page.fileId)}>
-                      {getFileName(page.fileId)}
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => togglePageExcluded(page.id)}
-                      disabled={isMerging}
-                      className={`mt-1 w-full rounded px-2 py-1 text-xs font-medium ${
-                        page.excluded ? 'bg-gray-200 text-gray-700' : 'bg-purple-100 text-purple-700'
-                      }`}
-                    >
-                      {page.excluded ? '含める' : '除外'}
-                    </button>
-                  </li>
-                ))}
-              </ol>
-            </section>
+            <MergePageOrder
+              pages={orderedPages}
+              getFileName={getFileName}
+              canInterleave={readyFiles.length >= 2}
+              isMerging={isMerging}
+              onInterleave={applyInterleave}
+              onReorder={reorderPage}
+              onToggleExcluded={togglePageExcluded}
+            />
           )}
 
           <section className="rounded-xl border border-gray-200 bg-white p-4 text-left" aria-labelledby="output-settings-title">
@@ -929,34 +579,7 @@ export default function PdfMerger() {
             </div>
           )}
 
-          {completion && (
-            <section className="rounded-xl border border-green-300 bg-green-50 p-5 text-left" aria-labelledby="merge-complete-title">
-              <div className="flex flex-wrap items-center gap-4">
-                <CheckCircle2 className="h-9 w-9 flex-none text-green-600" aria-hidden="true" />
-                <div className="min-w-48 flex-1">
-                  <h3 id="merge-complete-title" className="font-bold text-green-900">PDFを作成しました</h3>
-                  <p className="text-sm text-green-800">
-                    {completion.filename}・{completion.pageCount}ページ・{formatBytes(completion.byteLength)}・
-                    {(completion.elapsedMs / 1000).toFixed(1)}秒
-                  </p>
-                </div>
-                <a
-                  href={completion.url}
-                  download={completion.filename}
-                  className="flex items-center gap-2 rounded-lg bg-green-700 px-5 py-2.5 font-medium text-white hover:bg-green-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-green-800"
-                >
-                  <Download className="h-5 w-5" aria-hidden="true" /> ダウンロード
-                </a>
-                <button
-                  type="button"
-                  onClick={() => sendPdfToEditor(completion.blob, completion.filename)}
-                  className="rounded-lg px-3 py-2 text-sm font-medium text-green-800 hover:bg-green-100"
-                >
-                  続けて編集
-                </button>
-              </div>
-            </section>
-          )}
+          {completion && <MergeCompletionPanel completion={completion} />}
         </div>
       )}
     </section>

@@ -237,15 +237,22 @@ src/
 │   ├── PdfEditor.tsx           # PDF編集（ページ管理・テキストボックス・ヘッダー/フッター・ページ番号・PNG出力）
 │   ├── PdfMerger.tsx           # PDF結合
 │   ├── ProgressBar.tsx         # 進捗バー
+│   ├── imageToPdf/             # 画像→PDF変換の部品（出力設定・画像リスト項目・補正パネル）
+│   ├── pdfMerge/               # PDF結合の部品（ファイルカード・結合ページ順・完了表示）
 │   └── pdfEdit/
 │       ├── ContentEditPanel.tsx    # 既存コンテンツ編集パネル
+│       ├── DraftResumeBanner.tsx   # 前回の下書き再開バナー
+│       ├── PdfLoadErrorPanel.tsx   # PDF読み込みエラー表示
+│       ├── PdfPasswordForm.tsx     # パスワード付きPDFの入力フォーム
 │       ├── RecipeManager.tsx       # 作業レシピの保存・読込・適用
 │       ├── TextBoxEditor.tsx       # テキストボックス設定パネル
 │       ├── HeaderFooterEditor.tsx  # ヘッダー/フッター設定パネル
 │       ├── PageNumberEditor.tsx    # ページ番号設定パネル
 │       ├── PageManagementPanel.tsx # ページ削除・並び替え・抽出パネル
+│       ├── PdfEditorFileBar.tsx    # ファイル情報・保存状態・Undo/Redo・自動保存バー
 │       ├── PdfEditorSidebar.tsx    # PDF編集サイドバー
-│       └── PdfEditorPreview.tsx    # PDF編集プレビュー
+│       ├── PdfEditorPreview.tsx    # PDF編集プレビュー
+│       └── RedactionFailureDialog.tsx # 完全削除の検証失敗ダイアログ
 ├── hooks/
 │   ├── useDropzone.ts          # ドラッグ＆ドロップフック
 │   └── usePdfDocument.ts       # PDF読み込み・サムネイル生成フック
@@ -255,19 +262,25 @@ src/
 │   ├── pdfGraphics.ts          # 図形・画像・透かしの型定義
 │   └── recipe.ts               # 作業レシピ（version 2）の型定義・検証・v1移行
 ├── utils/
+│   ├── arrayUtils.ts           # 配列の並び替え・ページ範囲変換
+│   ├── async.ts                # 中断（AbortSignal）・フレーム待ちの共通処理
 │   ├── contentEditOperations.ts # 既存コンテンツ編集の適用（カバー+再描画・完全削除）
 │   ├── contentRecognition.ts   # テキスト・パス認識（pdf.jsオペレータ解析）
 │   ├── contentRules.ts         # レシピのコンテンツ編集ルールを認識結果へ解決
 │   ├── editPipeline.ts         # 編集適用の共通パイプライン（ページ計画→コンテンツ編集→テキスト→図形）
 │   ├── fontLoader.ts           # 日本語フォント読み込み（ブラウザ / Node で差し替え可能）
+│   ├── format.ts               # バイト数・エラーメッセージの表示整形
+│   ├── imageExport.ts          # PDF編集の画像出力（ファイル名・対象ページ・ZIP保存）
+│   ├── imageToPdfSettings.ts   # 画像→PDF設定の保存値の検証・読み込み
 │   ├── imagesToPdf.ts          # 画像→PDF変換ユーティリティ
 │   ├── overlayRenderer.ts      # プレビューオーバーレイ描画
 │   ├── pageGeometry.ts         # 表示座標系（CropBox・回転・UserUnit）とPDF座標の変換
-│   ├── pageOrderUtils.ts       # ページ並び替えユーティリティ
 │   ├── pdfColor.ts             # 16進カラー→pdf-lib RGB
 │   ├── pdfEditOperations.ts    # テキストボックス・ヘッダー/フッター・ページ番号の描画
-│   ├── pdfEditor.ts            # PDFページ編集ユーティリティ
+│   ├── pdfEditor.ts            # PDFページ編集・ページ構成変更時の編集内容の付け替え
 │   ├── pdfGraphics.ts          # 図形・画像・透かしの描画
+│   ├── pdfMergeLoader.ts       # PDF結合用の読み込み（サムネイル・重複判定用署名）
+│   ├── pdfMergeUtils.ts        # PDF結合の並び替え・エラー分類・ファイル名整形
 │   ├── pdfInspection.ts        # PDF構造（テキスト・パス）の抽出（CLI inspect・ルール解決）
 │   ├── pdfToImages.ts          # PDF→画像変換ユーティリティ
 │   ├── recipeApply.ts          # レシピを1つのPDFへ適用（バッチ・CLI共通）

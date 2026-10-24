@@ -99,22 +99,6 @@ export function classifyPdfLoadError(error: unknown): PdfLoadErrorInfo {
   };
 }
 
-export function moveItem<T>(items: readonly T[], fromIndex: number, toIndex: number): T[] {
-  if (
-    fromIndex < 0 ||
-    toIndex < 0 ||
-    fromIndex >= items.length ||
-    toIndex >= items.length ||
-    fromIndex === toIndex
-  ) {
-    return [...items];
-  }
-  const next = [...items];
-  const [item] = next.splice(fromIndex, 1);
-  next.splice(toIndex, 0, item);
-  return next;
-}
-
 export function regroupPagesByFile<T extends OrderableMergePage>(
   pages: readonly T[],
   fileOrder: readonly string[],
@@ -158,10 +142,4 @@ export function sanitizePdfFilename(value: string): string {
   const withoutExtension = value.trim().replace(/\.pdf$/i, '');
   const safe = withoutExtension.replace(/[<>:"/\\|?*\p{Cc}]/gu, '_').replace(/[. ]+$/g, '');
   return `${safe || 'merged'}.pdf`;
-}
-
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 }

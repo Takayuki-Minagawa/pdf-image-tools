@@ -7,12 +7,18 @@ import {
   duplicatePagePlanSelection,
   extractPdfPageIndices,
   getUnrotatedPageSize,
+  remapPageIndex,
+  remapPageSelection,
+  remapTextBoxesForPagePlan,
+  remapWatermarkForPagePlan,
   reorderPdfPages,
+  retainContentEditsForPagePlan,
 } from './pdfEditor';
 import { sanitizeFilename } from './download';
 import { visualPointToPdf } from './pdfEditOperations';
 import type { ContentEdit } from '../types/contentEdit';
 import type { TextBoxConfig } from '../types/pdfEdit';
+import { DEFAULT_WATERMARK } from '../types/pdfGraphics';
 
 async function createSourcePdf() {
   const document = await PDFDocument.create();
@@ -214,5 +220,60 @@ describe('visualPointToPdf', () => {
     page.setMediaBox(-30, -40, 200, 300);
 
     expect(visualPointToPdf(page, 0, 0)).toEqual({ x: -30, y: 260 });
+  });
+});
+
+describe('page plan remapping', () => {
+  const previous = [
+    { id: 'a', sourcePageIndex: 0, rotation: 0 as const },
+    { id: 'b', sourcePageIndex: 1, rotation: 0 as const },
+    { id: 'c', sourcePageIndex: 2, rotation: 0 as const },
+  ];
+  // 'b' を削除し、'c' を先頭へ移動した構成
+  const next = [previous[2], previous[0]];
+
+  const box = (id: string, pageIndex: number) => ({ id, pageIndex }) as TextBoxConfig;
+
+  it('follows page entries across reorder and deletion', () => {
+    expect(remapPageIndex(0, previous, next)).toBe(1);
+    expect(remapPageIndex(1, previous, next)).toBe(-1);
+    expect(remapPageIndex(2, previous, next)).toBe(0);
+    expect(remapPageIndex(9, previous, next)).toBe(-1);
+  });
+
+  it('remaps the page selection and drops deleted pages', () => {
+    expect([...remapPageSelection(new Set([0, 1, 2]), previous, next)].sort()).toEqual([0, 1]);
+  });
+
+  it('keeps all-page text boxes and removes boxes on deleted pages', () => {
+    const remapped = remapTextBoxesForPagePlan(
+      [box('all', -1), box('first', 0), box('deleted', 1), box('last', 2)],
+      previous,
+      next,
+    );
+    expect(remapped.map(({ id, pageIndex }) => [id, pageIndex])).toEqual([
+      ['all', -1],
+      ['first', 1],
+      ['last', 0],
+    ]);
+  });
+
+  it('disables a watermark whose page was deleted', () => {
+    const allPages = { ...DEFAULT_WATERMARK, enabled: true, pageIndex: -1 };
+    expect(remapWatermarkForPagePlan(allPages, previous, next)).toBe(allPages);
+    expect(remapWatermarkForPagePlan({ ...allPages, pageIndex: 2 }, previous, next).pageIndex).toBe(0);
+    expect(remapWatermarkForPagePlan({ ...allPages, pageIndex: 1 }, previous, next)).toMatchObject({
+      enabled: false,
+      pageIndex: -1,
+    });
+  });
+
+  it('drops content edits scoped to deleted page entries', () => {
+    const edits = [
+      { pageEntryId: 'a' },
+      { pageEntryId: 'b' },
+      { pageEntryId: undefined },
+    ] as ContentEdit[];
+    expect(retainContentEditsForPagePlan(edits, next).map((edit) => edit.pageEntryId)).toEqual(['a', undefined]);
   });
 });
