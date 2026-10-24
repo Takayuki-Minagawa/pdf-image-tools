@@ -1,7 +1,6 @@
 import { CheckCircle2, Clock3, FileUp, Redo2, RotateCcw, ShieldCheck, Trash2, Undo2 } from 'lucide-react';
+import type { DraftStatus } from '../../hooks/usePdfDraftAutosave';
 import { formatBytes } from '../../utils/format';
-
-export type DraftStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 interface PdfEditorFileBarProps {
   file: File;

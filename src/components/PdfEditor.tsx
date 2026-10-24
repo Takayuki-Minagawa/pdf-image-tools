@@ -1,14 +1,15 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { AlertTriangle, CheckCircle2, HardDrive, ShieldCheck } from 'lucide-react';
 import { Dropzone } from './Dropzone';
 import { ImagePreview } from './ImagePreview';
-import { ProgressBar } from './ProgressBar';
 import { DraftResumeBanner } from './pdfEdit/DraftResumeBanner';
 import { PageManagementPanel } from './pdfEdit/PageManagementPanel';
-import { PdfEditorFileBar, type DraftStatus } from './pdfEdit/PdfEditorFileBar';
+import { PdfDocumentNotices } from './pdfEdit/PdfDocumentNotices';
+import { PdfEditorFileBar } from './pdfEdit/PdfEditorFileBar';
 import { PdfEditorSidebar, type EditorSubTab } from './pdfEdit/PdfEditorSidebar';
 import { PdfEditorPreview } from './pdfEdit/PdfEditorPreview';
 import { PdfLoadErrorPanel } from './pdfEdit/PdfLoadErrorPanel';
+import { PdfOutputNameBar } from './pdfEdit/PdfOutputNameBar';
+import { PdfOutputStatus } from './pdfEdit/PdfOutputStatus';
 import { PdfPasswordForm } from './pdfEdit/PdfPasswordForm';
 import { GraphicsOverlay } from './pdfEdit/GraphicsOverlay';
 import { PdfTextSearch } from './pdfEdit/PdfTextSearch';
@@ -17,9 +18,7 @@ import { DEFAULT_WATERMARK, type PdfGraphic, type WatermarkConfig } from '../typ
 import { remapGraphicsForPages, duplicateGraphicsForPages } from '../utils/pdfGraphics';
 import { rotateGraphicsToPagePlan } from '../utils/pageGraphicRotation';
 import {
-  downloadPdf,
   duplicatePagePlanSelection,
-  extractPdfPageIndices,
   getUnrotatedPageSize,
   remapPageSelection,
   remapTextBoxesForPagePlan,
@@ -32,20 +31,24 @@ import {
   hasPagePlanChanges,
 } from '../utils/editPipeline';
 import { resolveContentRules } from '../utils/contentRules';
-import { pdfBytesToImages } from '../utils/pdfToImages';
 import { usePdfDocument } from '../hooks/usePdfDocument';
 import { useUndoHistory } from '../hooks/useUndoHistory';
-import {
-  drawTextBoxesOverlay,
-  drawHeaderFooterOverlay,
-  drawPageNumberOverlay,
-  drawRecognizedItemsOverlay,
-  drawContentEditsOverlay,
-  type OverlayContext,
-} from '../utils/overlayRenderer';
+import { usePdfDraftAutosave } from '../hooks/usePdfDraftAutosave';
+import { usePdfEditorOutput } from '../hooks/usePdfEditorOutput';
+import { usePdfPageRenderer } from '../hooks/usePdfPageRenderer';
+import { usePreviewOverlay } from '../hooks/usePreviewOverlay';
+import { usePageContentRecognition } from '../hooks/usePageContentRecognition';
+import { usePageNavigation } from '../hooks/usePageNavigation';
+import { useBeforeUnloadWarning, useUndoRedoShortcut } from '../hooks/useEditorKeyboard';
 import { recognizePageContent, hitTestRecognizedItems } from '../utils/contentRecognition';
-import { RedactionVerificationError } from '../utils/contentEditOperations';
-import type { ConvertedImage } from '../utils/pdfToImages';
+import {
+  contentEditsForPage,
+  mergeScopedContentEdits,
+  scopeContentEditsToPagePlan,
+  upsertScopedContentEdit,
+} from '../utils/contentEditScope';
+import { prepareRecipeGraphicsForEditor } from '../utils/recipeEditor';
+import { selectPagesByParity, toggleSelectAllPages, togglePageInSelection } from '../utils/pageSelection';
 import type {
   TextBoxConfig,
   HeaderFooterSettings,
@@ -57,43 +60,21 @@ import {
   DEFAULT_HEADER_FOOTER,
   DEFAULT_PAGE_NUMBERING,
 } from '../types/pdfEdit';
-import type { ContentEdit, RecognizedItem } from '../types/contentEdit';
-import type { PageViewport, RenderTask } from 'pdfjs-dist';
+import type { ContentEdit } from '../types/contentEdit';
 import {
   deletePdfDraft,
-  getStorageSummary,
-  loadPdfDraft,
-  requestPersistentStorage,
-  savePdfDraft,
   type PdfEditorDraftSnapshot,
   type StoredPdfDraft,
 } from '../utils/draftStorage';
 import type { PdfEditRecipe } from '../types/recipe';
-import { sanitizeFilename } from '../utils/download';
-import {
-  IMAGE_EXPORT_STORAGE_KEY,
-  downloadImagesAsZip,
-  imageExportFileName,
-  readStoredImageExportOptions,
-  resolveImageExportPageIndices,
-} from '../utils/imageExport';
-import { moveItem, pageRangeToIndices } from '../utils/arrayUtils';
-import { isAbortError } from '../utils/async';
-import { formatBytes, getErrorMessage } from '../utils/format';
+import { IMAGE_EXPORT_STORAGE_KEY, readStoredImageExportOptions } from '../utils/imageExport';
+import { moveItem } from '../utils/arrayUtils';
+import { getErrorMessage } from '../utils/format';
 import {
   consumePendingPdf,
   peekPendingPdf,
   subscribePdfEditorHandoff,
 } from '../utils/workflowHandoff';
-
-type RedactionFailureOperation = 'save' | 'extract-range' | 'extract-selected' | 'export-images';
-
-interface RedactionFailureState {
-  error: RedactionVerificationError;
-  operation: RedactionFailureOperation;
-}
-
-const AUTO_SAVE_STORAGE_KEY = 'pdf-image-tools:auto-save';
 
 function defaultOutputName(fileName: string) {
   return fileName.replace(/\.pdf$/i, '') + '_edited';
@@ -121,13 +102,7 @@ export default function PdfEditor() {
   } = usePdfDocument(pdfFile);
   const originalTotalPages = pdf?.numPages ?? 0;
 
-  const [currentPage, setCurrentPage] = useState(1);
   const [scale, setScale] = useState(1);
-  const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
-  // 表示中ページのviewport。ユーザー空間⇔キャンバス座標の変換に使う
-  // （CropBox原点や回転を考慮するため、scaleによる単純な換算では不十分）。
-  const [pageViewport, setPageViewport] = useState<PageViewport | null>(null);
-  const [pageInputValue, setPageInputValue] = useState('1');
 
   const [activeSubTab, setActiveSubTab] = useState<EditorSubTab>('page-number');
   const [textBoxes, setTextBoxes] = useState<TextBoxConfig[]>([]);
@@ -139,10 +114,6 @@ export default function PdfEditor() {
   const [activeGraphicId, setActiveGraphicId] = useState<string | null>(null);
 
   const [contentEdits, setContentEdits] = useState<ContentEdit[]>([]);
-  const [recognizedByPage, setRecognizedByPage] = useState<Map<number, RecognizedItem[]>>(
-    new Map(),
-  );
-  const [isRecognizing, setIsRecognizing] = useState(false);
   const [selectedContentId, setSelectedContentId] = useState<string | null>(null);
 
   const [pageEntries, setPageEntries] = useState<PagePlanEntry[]>([]);
@@ -154,36 +125,36 @@ export default function PdfEditor() {
   const [extractStart, setExtractStart] = useState('');
   const [extractEnd, setExtractEnd] = useState('');
 
-  const [isSavingPdf, setIsSavingPdf] = useState(false);
   const [isRotatingPages, setIsRotatingPages] = useState(false);
-  const [isExportingPng, setIsExportingPng] = useState(false);
-  const [pngProgress, setPngProgress] = useState(0);
-  const [pngImages, setPngImages] = useState<ConvertedImage[]>([]);
   const [outputError, setOutputError] = useState<string | null>(null);
   const [outputMessage, setOutputMessage] = useState<string | null>(null);
   const [pdfOutputName, setPdfOutputName] = useState('edited');
   const [imageExportOptions, setImageExportOptions] = useState<PdfImageExportOptions>(readStoredImageExportOptions);
-  const exportAbortRef = useRef<AbortController | null>(null);
-  const [redactionFailure, setRedactionFailure] = useState<RedactionFailureState | null>(null);
-  const [redactionVerifiedAt, setRedactionVerifiedAt] = useState<number | null>(null);
-  const [availableDraft, setAvailableDraft] = useState<StoredPdfDraft | null>(null);
-  const [autoSaveEnabled, setAutoSaveEnabled] = useState(
-    () => localStorage.getItem(AUTO_SAVE_STORAGE_KEY) !== 'off',
-  );
-  const [draftStatus, setDraftStatus] = useState<DraftStatus>('idle');
-  const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
-  const [storageSummary, setStorageSummary] = useState({ usage: 0, quota: 0 });
   const pendingDraftRef = useRef<StoredPdfDraft | null>(null);
   const savedSignatureRef = useRef('');
-  const redactionDraftBlockedRef = useRef(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const displayPageCount = pageEntries.length;
+  const {
+    currentPage,
+    setCurrentPage,
+    pageInputValue,
+    setPageInputValue,
+    commitPageInput,
+    handlePageInputKeyDown,
+    goToPreviousPage,
+    goToNextPage,
+  } = usePageNavigation(displayPageCount);
   const currentPageEntry = pageEntries[currentPage - 1];
   const currentOriginalPageIndex = currentPageEntry?.sourcePageIndex ?? -1;
+  const { recognizedByPage, setRecognizedByPage, isRecognizing } = usePageContentRecognition(
+    pdf,
+    currentOriginalPageIndex,
+    activeSubTab === 'content',
+  );
   const currentPageItems =
     currentOriginalPageIndex >= 0
       ? (recognizedByPage.get(currentOriginalPageIndex) ?? null)
@@ -192,17 +163,12 @@ export default function PdfEditor() {
     ? (currentPageItems?.find((item) => item.id === selectedContentId) ?? null)
     : null;
   const currentPageContentEdits = useMemo(
-    () => contentEdits.filter((edit) =>
-      edit.pageEntryId
-        ? edit.pageEntryId === currentPageEntry?.id
-        : edit.target.pageIndex === currentOriginalPageIndex,
-    ),
+    () => contentEditsForPage(contentEdits, currentPageEntry?.id, currentOriginalPageIndex),
     [contentEdits, currentOriginalPageIndex, currentPageEntry?.id],
   );
   const hasRedactions = contentEdits.some(
     (edit) => edit.kind === 'text' && edit.action === 'redact',
   );
-  redactionDraftBlockedRef.current = hasRedactions;
   const hasPageChanges = hasPagePlanChanges(pageEntries, originalTotalPages);
 
   const editSnapshot = useMemo<PdfEditorDraftSnapshot>(() => ({
@@ -247,20 +213,6 @@ export default function PdfEditor() {
     pageEntriesRef.current = pageEntries;
   }, [pageEntries]);
 
-  const refreshStorageSummary = useCallback(() => {
-    void getStorageSummary().then(setStorageSummary).catch(() => undefined);
-  }, []);
-
-  const clearDraftState = useCallback(() => {
-    setAvailableDraft(null);
-    setDraftSavedAt(null);
-    setDraftStatus('idle');
-  }, []);
-
-  useEffect(() => {
-    setRedactionVerifiedAt(null);
-  }, [snapshotSignature]);
-
   useEffect(() => {
     if (!pdf) {
       setPageEntries([]);
@@ -289,171 +241,36 @@ export default function PdfEditor() {
     setExtractEnd('');
     if (pendingDraft) setImageExportOptions(pendingDraft.imageExportOptions);
     setRecognizedByPage(new Map());
-    setPageViewport(null);
     resetHistory(initialSnapshot);
     savedSignatureRef.current = JSON.stringify(initialSnapshot);
     pendingDraftRef.current = null;
-  }, [pdf, resetHistory, restoreSnapshot]);
+  }, [pdf, resetHistory, restoreSnapshot, setCurrentPage, setPageInputValue, setRecognizedByPage]);
 
-  // コンテンツ編集タブで表示中のページを解析する（ページ単位でキャッシュ）
-  useEffect(() => {
-    if (activeSubTab !== 'content' || !pdf || currentOriginalPageIndex < 0) return;
-    if (recognizedByPage.has(currentOriginalPageIndex)) return;
+  const { pageSize, pageViewport } = usePdfPageRenderer({
+    pdf,
+    entry: currentPageEntry,
+    scale,
+    canvasRef,
+    overlayCanvasRef,
+  });
 
-    let cancelled = false;
-
-    const recognize = async () => {
-      setIsRecognizing(true);
-      try {
-        const page = await pdf.getPage(currentOriginalPageIndex + 1);
-        const items = await recognizePageContent(page);
-        if (!cancelled) {
-          setRecognizedByPage((prev) => new Map(prev).set(currentOriginalPageIndex, items));
-        }
-      } catch (err) {
-        console.error(err);
-        if (!cancelled) {
-          setRecognizedByPage((prev) => new Map(prev).set(currentOriginalPageIndex, []));
-        }
-      } finally {
-        if (!cancelled) setIsRecognizing(false);
-      }
-    };
-
-    recognize();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeSubTab, pdf, currentOriginalPageIndex, recognizedByPage]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let renderTask: RenderTask | null = null;
-
-    const renderPage = async () => {
-      if (!pdf || !canvasRef.current || displayPageCount === 0) return;
-
-      const entry = pageEntries[currentPage - 1];
-      if (!entry) return;
-
-      const canvas = canvasRef.current;
-      const context = canvas.getContext('2d')!;
-      if (entry.sourcePageIndex === null) {
-        const baseWidth = entry.width ?? 595.28;
-        const baseHeight = entry.height ?? 841.89;
-        const rotated = entry.rotation === 90 || entry.rotation === 270;
-        const width = (rotated ? baseHeight : baseWidth) * scale;
-        const height = (rotated ? baseWidth : baseHeight) * scale;
-        canvas.width = width;
-        canvas.height = height;
-        context.fillStyle = '#ffffff';
-        context.fillRect(0, 0, width, height);
-        setPageSize({ width: rotated ? baseHeight : baseWidth, height: rotated ? baseWidth : baseHeight });
-        setPageViewport(null);
-        return;
-      }
-
-      const page = await pdf.getPage(entry.sourcePageIndex + 1);
-      if (cancelled) return;
-      const viewport = page.getViewport({ scale, rotation: (page.rotate + entry.rotation) % 360 });
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-
-      const originalViewport = page.getViewport({ scale: 1, rotation: (page.rotate + entry.rotation) % 360 });
-      setPageSize({ width: originalViewport.width, height: originalViewport.height });
-      setPageViewport(viewport);
-
-      renderTask = page.render({
-        canvasContext: context,
-        viewport,
-        canvas,
-      });
-      await renderTask.promise;
-    };
-
-    void renderPage().catch((error) => {
-      if (cancelled || (error instanceof Error && error.name === 'RenderingCancelledException')) return;
-      console.error(error);
-    });
-
-    return () => {
-      cancelled = true;
-      renderTask?.cancel();
-    };
-  }, [pdf, currentPage, scale, pageEntries, displayPageCount]);
-
-  useEffect(() => {
-    const base = canvasRef.current;
-    const overlay = overlayCanvasRef.current;
-    if (!base || !overlay) return;
-
-    overlay.width = base.width;
-    overlay.height = base.height;
-  }, [pageSize, scale]);
-
-  const drawOverlay = useCallback(() => {
-    const overlayCanvas = overlayCanvasRef.current;
-    if (!overlayCanvas || pageSize.width === 0) return;
-
-    const ctx = overlayCanvas.getContext('2d')!;
-    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-
-    const overlay: OverlayContext = {
-      ctx,
-      scale,
-      canvasWidth: overlayCanvas.width,
-      canvasHeight: overlayCanvas.height,
-      viewport: pageViewport,
-    };
-
-    // コンテンツ編集（カバー+再描画）は元ページ内容の変更を模すため最初に描く
-    drawContentEditsOverlay(overlay, currentPageContentEdits);
-    if (activeSubTab === 'content' && currentPageItems) {
-      drawRecognizedItemsOverlay(overlay, currentPageItems, selectedContentId);
-    }
-
-    drawTextBoxesOverlay(overlay, textBoxes, currentPage - 1, activeTextBoxId);
-    drawHeaderFooterOverlay(
-      overlay,
-      headerFooter,
-      currentPage,
-      displayPageCount,
-      pdfFile?.name || '',
-    );
-    drawPageNumberOverlay(overlay, pageNumbering, currentPage);
-  }, [
+  // ページサイズ変更でオーバーレイキャンバスが初期化された後に描くため、usePdfPageRenderer より後に呼ぶ。
+  usePreviewOverlay({
+    overlayCanvasRef,
+    pageSize,
+    scale,
+    pageViewport,
+    pageNumber: currentPage,
+    pageCount: displayPageCount,
+    fileName: pdfFile?.name || '',
+    contentEdits: currentPageContentEdits,
+    recognizedItems: activeSubTab === 'content' ? currentPageItems : null,
+    selectedContentId,
     textBoxes,
+    activeTextBoxId,
     headerFooter,
     pageNumbering,
-    currentPage,
-    displayPageCount,
-    scale,
-    pageSize,
-    pageViewport,
-    pdfFile,
-    activeTextBoxId,
-    activeSubTab,
-    currentPageItems,
-    currentPageContentEdits,
-    selectedContentId,
-  ]);
-
-  useEffect(() => {
-    drawOverlay();
-  }, [drawOverlay]);
-
-  useEffect(() => {
-    setPageInputValue(String(currentPage));
-  }, [currentPage]);
-
-  useEffect(() => {
-    if (displayPageCount === 0) return;
-
-    if (currentPage > displayPageCount) {
-      setCurrentPage(displayPageCount);
-    }
-  }, [currentPage, displayPageCount]);
+  });
 
   useEffect(() => {
     if (displayPageCount === 0) return;
@@ -463,117 +280,84 @@ export default function PdfEditor() {
     );
   }, [displayPageCount]);
 
-  useEffect(() => {
-    let cancelled = false;
-    loadPdfDraft()
-      .then((draft) => {
-        if (!cancelled && !pdfFile) setAvailableDraft(draft);
-      })
-      .catch((error) => console.warn('下書きを確認できませんでした', error));
-    return () => {
-      cancelled = true;
-    };
-  }, [pdfFile]);
-
-  useEffect(() => {
-    localStorage.setItem(AUTO_SAVE_STORAGE_KEY, autoSaveEnabled ? 'on' : 'off');
-    if (autoSaveEnabled) void requestPersistentStorage();
-  }, [autoSaveEnabled]);
+  const {
+    availableDraft,
+    setAvailableDraft,
+    autoSaveEnabled,
+    setAutoSaveEnabled,
+    draftStatus,
+    draftSavedAt,
+    storageSummary,
+    clearDraftState,
+    refreshStorageSummary,
+    discardDraft,
+  } = usePdfDraftAutosave({
+    pdfFile,
+    loadedFile,
+    pdfBytes,
+    pdf,
+    snapshot: editSnapshot,
+    snapshotSignature,
+    isDirty,
+    hasRedactions,
+    savedSignatureRef,
+    currentPage,
+    scale,
+    activeSubTab,
+    imageExportOptions,
+  });
 
   useEffect(() => {
     localStorage.setItem(IMAGE_EXPORT_STORAGE_KEY, JSON.stringify(imageExportOptions));
   }, [imageExportOptions]);
 
-  useEffect(() => {
-    if (!hasRedactions) return;
-    let cancelled = false;
-    void deletePdfDraft()
-      .then(() => {
-        if (cancelled) return;
-        clearDraftState();
-        refreshStorageSummary();
-      })
-      .catch((error) => console.warn('墨消しを含む下書きを削除できませんでした', error));
-    return () => {
-      cancelled = true;
-    };
-  }, [clearDraftState, hasRedactions, refreshStorageSummary]);
+  useBeforeUnloadWarning(isDirty);
+  useUndoRedoShortcut(history.undo, history.redo);
 
-  useEffect(() => {
-    if (
-      !autoSaveEnabled ||
-      !isDirty ||
-      hasRedactions ||
-      !pdfFile ||
-      loadedFile !== pdfFile ||
-      !pdfBytes ||
-      !pdf ||
-      pageEntries.length === 0
-    ) return;
-    let cancelled = false;
-    setDraftStatus('saving');
-    const timeout = window.setTimeout(() => {
-      savePdfDraft({
-        fileName: pdfFile.name,
-        fileType: pdfFile.type || 'application/pdf',
-        fileLastModified: pdfFile.lastModified,
-        fileBytes: pdfBytes.slice(0),
-        snapshot: structuredClone(editSnapshot),
-        currentPage,
-        scale,
-        activeSubTab,
-        imageExportOptions,
-        savedAt: Date.now(),
-      }).then(async () => {
-        if (redactionDraftBlockedRef.current) {
-          await deletePdfDraft();
-          if (!cancelled) {
-            setDraftSavedAt(null);
-            setDraftStatus('idle');
-          }
-          return;
-        }
-        savedSignatureRef.current = snapshotSignature;
-        if (cancelled) return;
-        setDraftSavedAt(Date.now());
-        setDraftStatus('saved');
-        refreshStorageSummary();
-      }).catch((error) => {
-        if (cancelled) return;
-        console.warn('下書きを保存できませんでした', error);
-        setDraftStatus('error');
-      });
-    }, 900);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timeout);
-    };
-  }, [activeSubTab, autoSaveEnabled, currentPage, editSnapshot, hasRedactions, imageExportOptions, isDirty, loadedFile, pageEntries.length, pdf, pdfBytes, pdfFile, refreshStorageSummary, scale, snapshotSignature]);
+  // 保存・抽出・画像出力は共通パイプライン（バッチ処理・CLIと同一の適用順序）を使う。
+  const buildEditedPdf = useCallback(async (allowCoverOnly = false) => {
+    if (!pdfBytes || !pdfFile) {
+      throw new Error('PDFが読み込まれていません');
+    }
+    return runEditPipeline(
+      pdfBytes,
+      { pageEntries, textBoxes, headerFooter, pageNumbering, contentEdits, graphics, watermark },
+      { fileName: pdfFile.name, originalPageCount: originalTotalPages, allowCoverOnly },
+    );
+  }, [
+    graphics,
+    watermark,
+    pdfBytes,
+    pdfFile,
+    originalTotalPages,
+    pageEntries,
+    textBoxes,
+    headerFooter,
+    pageNumbering,
+    contentEdits,
+  ]);
 
-  useEffect(() => {
-    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (!isDirty) return;
-      event.preventDefault();
-      event.returnValue = '';
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [isDirty]);
-
-  useEffect(() => {
-    const handleShortcut = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
-      const target = event.target as HTMLElement | null;
-      const isTextInput = target?.matches('input, textarea, [contenteditable="true"]');
-      if (isTextInput) return;
-      if (event.key.toLowerCase() !== 'z') return;
-      event.preventDefault();
-      if (event.shiftKey) history.redo();
-      else history.undo();
-    };
-    window.addEventListener('keydown', handleShortcut);
-    return () => window.removeEventListener('keydown', handleShortcut);
-  }, [history]);
+  const output = usePdfEditorOutput({
+    buildEditedPdf,
+    sourceFileName: pdfFile?.name,
+    outputName: pdfOutputName,
+    pageCount: displayPageCount,
+    selectedPages,
+    extractStart,
+    extractEnd,
+    imageExportOptions,
+    hasRedactions,
+    snapshotSignature,
+    beforeSaveDownload: deletePdfDraft,
+    onSaved: () => {
+      savedSignatureRef.current = snapshotSignature;
+      clearDraftState();
+      refreshStorageSummary();
+    },
+    setOutputError,
+    setOutputMessage,
+  });
+  const { clearImages: clearOutputImages, resetOutput } = output;
 
   const resumeDraft = async () => {
     if (!availableDraft) return;
@@ -585,28 +369,6 @@ export default function PdfEditor() {
     setPdfOutputName(defaultOutputName(file.name));
     setAvailableDraft(null);
     setPdfFile(file);
-  };
-
-  const discardDraft = async () => {
-    await deletePdfDraft();
-    clearDraftState();
-    refreshStorageSummary();
-  };
-
-  const handlePageInputCommit = () => {
-    const page = parseInt(pageInputValue, 10);
-    if (!Number.isNaN(page) && page >= 1 && page <= displayPageCount) {
-      setCurrentPage(page);
-    } else {
-      setPageInputValue(String(currentPage));
-    }
-  };
-
-  const handlePageInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.currentTarget.blur();
-      handlePageInputCommit();
-    }
   };
 
   const handleCanvasClick = useCallback(
@@ -649,12 +411,11 @@ export default function PdfEditor() {
     setActiveGraphicId(null);
     setRecognizedByPage(new Map());
     setSelectedContentId(null);
-    setPngImages([]);
+    resetOutput();
     setOutputError(null);
-    setPngProgress(0);
     setOutputMessage(null);
     savedSignatureRef.current = '';
-  }, []);
+  }, [resetOutput, setRecognizedByPage]);
 
   const handleFileDrop = useCallback((files: File[]) => {
     const nextPdfFile = files.find((file) =>
@@ -701,15 +462,7 @@ export default function PdfEditor() {
 
   const upsertContentEdit = useCallback((edit: ContentEdit) => {
     const scopedEdit = { ...edit, pageEntryId: currentPageEntry?.id } as ContentEdit;
-    setContentEdits((prev) => {
-      const index = prev.findIndex((entry) =>
-        entry.target.id === edit.target.id && entry.pageEntryId === scopedEdit.pageEntryId,
-      );
-      if (index === -1) return [...prev, scopedEdit];
-      const next = [...prev];
-      next[index] = scopedEdit;
-      return next;
-    });
+    setContentEdits((prev) => upsertScopedContentEdit(prev, scopedEdit));
   }, [currentPageEntry?.id]);
 
   const removeContentEdit = useCallback((targetId: string) => {
@@ -743,36 +496,14 @@ export default function PdfEditor() {
     latestSnapshotRef.current !== snapshot || pageEntriesRef.current !== entries;
 
   const togglePageSelection = (displayIndex: number, extend = false) => {
-    const nextSelected = new Set(selectedPages);
-    if (extend && selectionAnchor !== null) {
-      const start = Math.min(selectionAnchor, displayIndex);
-      const end = Math.max(selectionAnchor, displayIndex);
-      for (let index = start; index <= end; index++) nextSelected.add(index);
-    } else if (nextSelected.has(displayIndex)) {
-      nextSelected.delete(displayIndex);
-    } else {
-      nextSelected.add(displayIndex);
-    }
-    setSelectedPages(nextSelected);
+    setSelectedPages(togglePageInSelection(selectedPages, displayIndex, selectionAnchor, extend));
     setSelectionAnchor(displayIndex);
   };
 
-  const toggleSelectAll = () => {
-    if (selectedPages.size === displayPageCount) {
-      setSelectedPages(new Set());
-    } else {
-      setSelectedPages(new Set(pageEntries.map((_, index) => index)));
-    }
-  };
+  const toggleSelectAll = () => setSelectedPages(toggleSelectAllPages(selectedPages, displayPageCount));
 
   const selectPagePattern = (pattern: 'odd' | 'even' | 'none') => {
-    if (pattern === 'none') {
-      setSelectedPages(new Set());
-      return;
-    }
-    setSelectedPages(new Set(pageEntries.flatMap((_, index) =>
-      ((index + 1) % 2 === (pattern === 'odd' ? 1 : 0)) ? [index] : [],
-    )));
+    setSelectedPages(pattern === 'none' ? new Set() : selectPagesByParity(displayPageCount, pattern));
   };
 
   const deleteSelectedPages = () => {
@@ -785,7 +516,7 @@ export default function PdfEditor() {
     const nextEntries = pageEntries.filter((_, index) => !selectedPages.has(index));
     updatePageEntries(nextEntries);
     setSelectedPages(new Set());
-    setPngImages([]);
+    clearOutputImages();
     setOutputError(null);
 
     if (currentPage > nextEntries.length) {
@@ -810,7 +541,7 @@ export default function PdfEditor() {
       updatePageEntries(nextEntries);
       setGraphics(rotatedGraphics);
       setActiveGraphicId(null);
-      setPngImages([]);
+      clearOutputImages();
     } catch (error) {
       setOutputError(getErrorMessage(error, 'ページを回転できませんでした'));
     } finally {
@@ -833,7 +564,7 @@ export default function PdfEditor() {
     setWatermark(remapWatermarkForPagePlan(watermark, pageEntries, duplicated.pageEntries));
     setContentEdits(duplicated.contentEdits);
     setSelectedPages(new Set());
-    setPngImages([]);
+    clearOutputImages();
   };
 
   const insertBlankPage = () => {
@@ -878,7 +609,7 @@ export default function PdfEditor() {
       setCurrentPage(1);
       setExtractStart('');
       setExtractEnd('');
-      setPngImages([]);
+      clearOutputImages();
     } catch (error) {
       setOutputError(getErrorMessage(error, 'ページ操作をリセットできませんでした'));
     } finally {
@@ -899,7 +630,7 @@ export default function PdfEditor() {
     updatePageEntries(moveItem(pageEntriesRef.current, fromIndex, displayIndex));
     draggedIndexRef.current = displayIndex;
     setDraggedIndex(displayIndex);
-    setPngImages([]);
+    clearOutputImages();
     setOutputError(null);
   };
 
@@ -914,186 +645,6 @@ export default function PdfEditor() {
     updatePageEntries(moveItem(pageEntries, displayIndex, targetIndex));
   };
 
-  // 保存・抽出・画像出力は共通パイプライン（バッチ処理・CLIと同一の適用順序）を使う。
-  const buildEditedPdf = useCallback(async (allowCoverOnly = false) => {
-    if (!pdfBytes || !pdfFile) {
-      throw new Error('PDFが読み込まれていません');
-    }
-    return runEditPipeline(
-      pdfBytes,
-      { pageEntries, textBoxes, headerFooter, pageNumbering, contentEdits, graphics, watermark },
-      { fileName: pdfFile.name, originalPageCount: originalTotalPages, allowCoverOnly },
-    );
-  }, [
-    graphics,
-    watermark,
-    pdfBytes,
-    pdfFile,
-    originalTotalPages,
-    pageEntries,
-    textBoxes,
-    headerFooter,
-    pageNumbering,
-    contentEdits,
-  ]);
-
-  const reportOutputFailure = (
-    error: unknown,
-    operation: RedactionFailureOperation,
-    describe: (error: unknown) => string,
-  ) => {
-    console.error(error);
-    if (error instanceof RedactionVerificationError) {
-      setRedactionFailure({ error, operation });
-    } else {
-      setOutputError(describe(error));
-    }
-  };
-
-  const handleExtract = async (allowCoverOnly = false) => {
-    if (!pdfFile) return;
-
-    const start = parseInt(extractStart, 10);
-    const end = parseInt(extractEnd, 10);
-
-    if (
-      Number.isNaN(start) ||
-      Number.isNaN(end) ||
-      start < 1 ||
-      end > displayPageCount ||
-      start > end
-    ) {
-      alert(`有効なページ範囲を指定してください (1〜${displayPageCount})`);
-      return;
-    }
-
-    try {
-      const editedPdf = await buildEditedPdf(allowCoverOnly);
-      const extractedPdf = await extractPdfPageIndices(editedPdf, pageRangeToIndices(start, end));
-      downloadPdf(extractedPdf, `${pdfFile.name.replace('.pdf', '')}_pages_${start}-${end}.pdf`);
-      setRedactionFailure(null);
-    } catch (err) {
-      reportOutputFailure(err, 'extract-range', (error) => '抽出中にエラーが発生しました: ' + getErrorMessage(error));
-    }
-  };
-
-  const handleExtractSelected = async (allowCoverOnly = false) => {
-    if (selectedPages.size === 0) return;
-    setOutputError(null);
-    try {
-      const editedPdf = await buildEditedPdf(allowCoverOnly);
-      const pageIndices = [...selectedPages].sort((a, b) => a - b);
-      const extractedPdf = await extractPdfPageIndices(editedPdf, pageIndices);
-      downloadPdf(extractedPdf, `${sanitizeFilename(pdfOutputName, 'selected-pages')}_selected.pdf`);
-      setRedactionFailure(null);
-      setOutputMessage(`${pageIndices.length}ページを抽出しました`);
-    } catch (error) {
-      reportOutputFailure(error, 'extract-selected', (reason) => getErrorMessage(reason, '選択ページを抽出できませんでした'));
-    }
-  };
-
-  const handleSavePdf = async (allowCoverOnly = false) => {
-    if (!pdfFile) return;
-
-    setIsSavingPdf(true);
-    setOutputError(null);
-    setOutputMessage(null);
-
-    try {
-      const result = await buildEditedPdf(allowCoverOnly);
-      const filename = `${sanitizeFilename(pdfOutputName, 'edited')}.pdf`;
-      await deletePdfDraft();
-      downloadPdf(result, filename);
-      savedSignatureRef.current = snapshotSignature;
-      clearDraftState();
-      setRedactionFailure(null);
-      setRedactionVerifiedAt(hasRedactions && !allowCoverOnly ? Date.now() : null);
-      refreshStorageSummary();
-      setOutputMessage(`${filename}（${formatBytes(result.byteLength)}）を保存しました`);
-    } catch (err) {
-      reportOutputFailure(err, 'save', (error) => 'PDF保存中にエラーが発生しました: ' + getErrorMessage(error));
-    } finally {
-      setIsSavingPdf(false);
-    }
-  };
-
-  const handleExportPng = async (allowCoverOnly = false) => {
-    if (!pdfFile) return;
-
-    setIsExportingPng(true);
-    setOutputError(null);
-    setOutputMessage(null);
-    setPngProgress(0);
-    setPngImages([]);
-    const controller = new AbortController();
-    exportAbortRef.current = controller;
-
-    try {
-      const result = await buildEditedPdf(allowCoverOnly);
-      const pageIndices = resolveImageExportPageIndices(imageExportOptions, selectedPages, displayPageCount);
-      const images = await pdfBytesToImages(result, {
-        scale: imageExportOptions.scale,
-        format: imageExportOptions.format,
-        quality: imageExportOptions.quality,
-        pageIndices,
-        onProgress: setPngProgress,
-        signal: controller.signal,
-      });
-      setPngImages(images);
-      setRedactionFailure(null);
-      if (imageExportOptions.zip && images.length > 1) {
-        await downloadImagesAsZip(images, imageExportOptions);
-        setOutputMessage(`${images.length}ページをZIPで保存しました`);
-      } else {
-        setOutputMessage(`${images.length}ページの画像を生成しました`);
-      }
-    } catch (err) {
-      if (isAbortError(err)) {
-        setOutputMessage('画像出力をキャンセルしました');
-      } else {
-        reportOutputFailure(err, 'export-images', (error) => '画像出力中にエラーが発生しました: ' + getErrorMessage(error));
-      }
-    } finally {
-      setIsExportingPng(false);
-      exportAbortRef.current = null;
-    }
-  };
-
-  const retryRedactionFailureWithCover = async () => {
-    if (!redactionFailure) return;
-    switch (redactionFailure.operation) {
-      case 'extract-range':
-        await handleExtract(true);
-        break;
-      case 'extract-selected':
-        await handleExtractSelected(true);
-        break;
-      case 'export-images':
-        await handleExportPng(true);
-        break;
-      default:
-        await handleSavePdf(true);
-    }
-  };
-
-  const handleDownloadPng = useCallback(
-    (image: ConvertedImage) => {
-      const link = document.createElement('a');
-      link.href = image.dataUrl;
-      link.download = imageExportFileName(imageExportOptions, image.pageNumber);
-      link.click();
-    },
-    [imageExportOptions],
-  );
-
-  const handleDownloadAllPng = useCallback(async () => {
-    if (pngImages.length === 1 && !imageExportOptions.zip) {
-      handleDownloadPng(pngImages[0]);
-      return;
-    }
-    await downloadImagesAsZip(pngImages, imageExportOptions);
-  }, [handleDownloadPng, imageExportOptions, pngImages]);
-
   const applyRecipe = async (recipe: PdfEditRecipe) => {
     setOutputError(null);
     setTextBoxes(structuredClone(recipe.textBoxes));
@@ -1101,20 +652,10 @@ export default function PdfEditor() {
     setPageNumbering(structuredClone(recipe.pageNumbering));
     setImageExportOptions(structuredClone(recipe.imageExportOptions));
 
-    // 図形は新しいIDで複製し、存在しないページ向けのもの・パス指定だけの画像は除外する。
-    const candidates: PdfGraphic[] = recipe.graphics
-      .filter((graphic) => graphic.pageIndex < displayPageCount)
-      .map((graphic) => {
-        const copy: PdfGraphic & { imagePath?: string } = { ...structuredClone(graphic), id: crypto.randomUUID() };
-        delete copy.imagePath;
-        return copy;
-      });
-    const skippedImages = candidates.filter((graphic) => graphic.kind === 'image' && !graphic.imageDataUrl).length;
-    setGraphics(candidates.filter((graphic) => graphic.kind !== 'image' || graphic.imageDataUrl));
-    setWatermark({
-      ...recipe.watermark,
-      pageIndex: recipe.watermark.pageIndex < displayPageCount ? recipe.watermark.pageIndex : -1,
-    });
+    const prepared = prepareRecipeGraphicsForEditor(recipe.graphics, recipe.watermark, displayPageCount);
+    setGraphics(prepared.graphics);
+    setWatermark(prepared.watermark);
+    const skippedImages = prepared.skippedImageCount;
     setActiveGraphicId(null);
 
     const notes: string[] = [];
@@ -1133,16 +674,8 @@ export default function PdfEditor() {
         };
         const resolved = await resolveContentRules(recipe.contentRules, pdf.numPages, readPage);
         setRecognizedByPage(cache);
-        const scoped = resolved.edits.map((edit) => ({
-          ...edit,
-          pageEntryId: pageEntriesRef.current.find((entry) => entry.sourcePageIndex === edit.target.pageIndex)?.id,
-        }) as ContentEdit);
-        setContentEdits((previous) => [
-          ...previous.filter((edit) => !scoped.some((candidate) =>
-            candidate.target.id === edit.target.id && candidate.pageEntryId === edit.pageEntryId,
-          )),
-          ...scoped,
-        ]);
+        const scoped = scopeContentEditsToPagePlan(resolved.edits, pageEntriesRef.current);
+        setContentEdits((previous) => mergeScopedContentEdits(previous, scoped));
         notes.push(`コンテンツ編集 ${resolved.edits.length}件を一致`);
         if (resolved.unmatched.length > 0) notes.push(`ルール${resolved.unmatched.length}件は一致なし`);
       } catch (error) {
@@ -1203,7 +736,7 @@ export default function PdfEditor() {
         displayPageCount={displayPageCount}
         originalPageCount={originalTotalPages}
         isDirty={isDirty}
-        redactionVerifiedAt={hasRedactions ? redactionVerifiedAt : null}
+        redactionVerifiedAt={output.redactionVerifiedAt}
         canUndo={history.canUndo}
         canRedo={history.canRedo}
         onUndo={history.undo}
@@ -1220,41 +753,14 @@ export default function PdfEditor() {
         onChangeFile={() => handleReset()}
       />
 
-      {estimatedMemoryBytes > 100 * 1024 * 1024 && (
-        <div className="flex items-start gap-2 rounded-lg border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">
-          <HardDrive className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>推定メモリ使用量は約{formatBytes(estimatedMemoryBytes)}です。サムネイルは表示範囲だけ遅延生成されます。</span>
-        </div>
-      )}
+      <PdfDocumentNotices estimatedMemoryBytes={estimatedMemoryBytes} passwordRasterized={passwordRasterized} />
 
-      {passwordRasterized && (
-        <div className="flex items-start gap-2 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
-          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>パスワード保護PDFは編集可能な画像PDFへ変換しました。元のテキスト層は出力に残らず、画質とファイル容量が変わる場合があります。</span>
-        </div>
-      )}
-
-      <div className="flex flex-wrap items-end gap-3 rounded-lg border border-gray-200 bg-white p-3">
-        <label className="min-w-56 flex-1 text-xs text-gray-600">
-          PDF出力名
-          <div className="mt-1 flex items-center gap-1">
-            <input value={pdfOutputName} onChange={(event) => setPdfOutputName(event.target.value)} className="min-w-0 flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-800" />
-            <span>.pdf</span>
-          </div>
-        </label>
-        <details className="relative">
-          <summary className="cursor-pointer rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-700">操作履歴 ({history.entries.length})</summary>
-          <ol className="absolute right-0 z-40 mt-1 max-h-60 w-64 overflow-auto rounded-lg border border-gray-200 bg-white p-2 shadow-xl">
-            {history.entries.map((entry) => (
-              <li key={`${entry.createdAt}-${entry.index}`}>
-                <button type="button" onClick={() => history.restoreAt(entry.index)} className={`w-full rounded px-2 py-1.5 text-left text-xs hover:bg-gray-50 ${entry.active ? 'bg-blue-50 font-semibold text-blue-700' : 'text-gray-600'}`}>
-                  {entry.label}・{new Date(entry.createdAt).toLocaleTimeString('ja-JP')}
-                </button>
-              </li>
-            ))}
-          </ol>
-        </details>
-      </div>
+      <PdfOutputNameBar
+        outputName={pdfOutputName}
+        onOutputNameChange={setPdfOutputName}
+        historyEntries={history.entries}
+        onRestoreHistory={history.restoreAt}
+      />
 
       <PdfTextSearch
         key={pageEntries[0]?.id ?? 'search'}
@@ -1293,8 +799,8 @@ export default function PdfEditor() {
         onResetPageChanges={resetPageChanges}
         onExtractStartChange={setExtractStart}
         onExtractEndChange={setExtractEnd}
-        onExtract={() => void handleExtract()}
-        onExtractSelected={() => void handleExtractSelected()}
+        onExtract={() => void output.extractRange()}
+        onExtractSelected={() => void output.extractSelected()}
         onDragStart={handleDragStart}
         onDragOver={handleDragOver}
         onDragEnd={handleDragEnd}
@@ -1337,10 +843,10 @@ export default function PdfEditor() {
           onUpsertContentEdit={upsertContentEdit}
           onRemoveContentEdit={removeContentEdit}
           onSelectContentItem={setSelectedContentId}
-          onSavePdf={() => void handleSavePdf()}
-          onExportPng={() => void handleExportPng()}
-          isSavingPdf={isSavingPdf}
-          isExportingPng={isExportingPng}
+          onSavePdf={() => void output.savePdf()}
+          onExportPng={() => void output.exportImages()}
+          isSavingPdf={output.isSavingPdf}
+          isExportingPng={output.isExportingImages}
           imageExportOptions={imageExportOptions}
           onImageExportOptionsChange={setImageExportOptions}
           selectedPageCount={selectedPages.size}
@@ -1352,10 +858,10 @@ export default function PdfEditor() {
           displayPageCount={displayPageCount}
           pageInputValue={pageInputValue}
           onPageInputValueChange={setPageInputValue}
-          onPageInputCommit={handlePageInputCommit}
+          onPageInputCommit={commitPageInput}
           onPageInputKeyDown={handlePageInputKeyDown}
-          onPrevPage={() => setCurrentPage((page) => Math.max(1, page - 1))}
-          onNextPage={() => setCurrentPage((page) => Math.min(displayPageCount, page + 1))}
+          onPrevPage={goToPreviousPage}
+          onNextPage={goToNextPage}
           scale={scale}
           onZoomOut={() => setScale((value) => Math.max(0.25, value - 0.25))}
           onZoomIn={() => setScale((value) => Math.min(3, value + 0.25))}
@@ -1388,43 +894,31 @@ export default function PdfEditor() {
         />
       </div>
 
-      {outputError && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-4 text-red-700" role="alert">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-          {outputError}
-        </div>
-      )}
-
-      {outputMessage && (
-        <div className="flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 p-4 text-green-700" role="status">
-          <CheckCircle2 className="h-4 w-4 shrink-0" />{outputMessage}
-        </div>
-      )}
-
-      {isExportingPng && (
-        <div className="space-y-2 rounded-lg border border-blue-100 bg-blue-50 p-3">
-          <ProgressBar progress={pngProgress} label={`編集結果を${imageExportOptions.format.toUpperCase()}に変換中...`} />
-          <button type="button" onClick={() => exportAbortRef.current?.abort()} className="text-sm text-red-600 underline">画像出力をキャンセル</button>
-        </div>
-      )}
-
-      <ImagePreview
-        images={pngImages}
-        onDownload={handleDownloadPng}
-        onDownloadAll={handleDownloadAllPng}
-        onClear={() => setPngImages([])}
+      <PdfOutputStatus
+        error={outputError}
+        message={outputMessage}
+        imageExportProgress={output.isExportingImages ? output.imageProgress : null}
+        imageExportFormat={imageExportOptions.format}
+        onCancelImageExport={output.cancelImageExport}
       />
 
-      {redactionFailure && (
+      <ImagePreview
+        images={output.images}
+        onDownload={output.downloadImage}
+        onDownloadAll={output.downloadAllImages}
+        onClear={clearOutputImages}
+      />
+
+      {output.redactionFailure && (
         <RedactionFailureDialog
-          error={redactionFailure.error}
-          isBusy={isSavingPdf || isExportingPng}
-          onClose={() => setRedactionFailure(null)}
+          error={output.redactionFailure.error}
+          isBusy={output.isSavingPdf || output.isExportingImages}
+          onClose={output.dismissRedactionFailure}
           onBackToEdit={() => {
-            setRedactionFailure(null);
+            output.dismissRedactionFailure();
             setActiveSubTab('content');
           }}
-          onRetryWithCover={() => void retryRedactionFailureWithCover()}
+          onRetryWithCover={() => void output.retryWithCoverOnly()}
         />
       )}
     </div>
