@@ -104,6 +104,11 @@ describe('inspect', () => {
 });
 
 describe('add-text and apply-recipe', () => {
+  it('refuses secure recipes on the ordinary save path', async () => {
+    const recipe = parseRecipe({ version: 3, regionRedaction: { version: 1, dpi: 72, regions: [] } });
+    await expect(applyRecipe(await samplePdf(), recipe, { fileName: 'sample.pdf' })).rejects.toThrow(/redact-regions/);
+  });
+
   it('adds a text box on every page at the requested visual position', async () => {
     const sample = await samplePdf();
     const output = await addText(sample, addTextOptionsFromArgs('承認済', { page: 'all', x: '200', y: '440', size: '14' }, 'sample.pdf'));

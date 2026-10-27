@@ -1,4 +1,5 @@
 import { jsPDF } from 'jspdf';
+import { throwIfAborted } from './async';
 
 export type ImageRotation = 0 | 90 | 180 | 270;
 export type PageSize = 'original' | 'a4' | 'a3' | 'b5' | 'letter';
@@ -216,7 +217,9 @@ export async function imagesToPdf(
   images: ImageFile[],
   onProgress?: (progress: number) => void,
   options: Partial<ImagesToPdfOptions> = {},
+  signal?: AbortSignal,
 ): Promise<Blob> {
+  throwIfAborted(signal);
   if (images.length === 0) {
     throw new Error('No images to convert');
   }
@@ -238,6 +241,7 @@ export async function imagesToPdf(
   });
 
   for (let index = 0; index < images.length; index += 1) {
+    throwIfAborted(signal);
     const image = images[index];
     const page = resolvePageDimensions(image, resolvedOptions);
     const effectiveDimensions = getEffectiveImageDimensions(image);
@@ -255,6 +259,7 @@ export async function imagesToPdf(
     const contentHeight = Math.max(0.1, page.height - safeMargin * 2);
     const coverAspect = resolvedOptions.fit === 'cover' ? contentWidth / contentHeight : undefined;
     const prepared = await prepareImage(image, resolvedOptions, coverAspect);
+    throwIfAborted(signal);
     const placement = coverAspect
       ? { x: safeMargin, y: safeMargin, width: contentWidth, height: contentHeight }
       : calculateImagePlacement(
@@ -279,6 +284,7 @@ export async function imagesToPdf(
     onProgress?.(((index + 1) / images.length) * 100);
   }
 
+  throwIfAborted(signal);
   return pdf.output('blob');
 }
 

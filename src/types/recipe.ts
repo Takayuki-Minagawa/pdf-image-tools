@@ -6,6 +6,7 @@
  *
  * - version 1: テキストボックス / ヘッダー・フッター / ページ番号 / 画像出力設定
  * - version 2: 上記 + 図形・画像 / 透かし / 既存コンテンツ編集ルール（contentRules）
+ * - version 3: 上記 + 専用前処理で実行する画素の領域除去（regionRedaction）
  */
 import type { PdfGraphic, PdfGraphicKind, WatermarkConfig } from './pdfGraphics';
 import { DEFAULT_WATERMARK } from './pdfGraphics';
@@ -21,8 +22,9 @@ import {
   DEFAULT_PAGE_NUMBERING,
 } from './pdfEdit';
 import type { RecognizedShape } from './contentEdit';
+import { parseRegionRedactionSettings, type RegionRedactionSettings } from './regionRedaction';
 
-export const RECIPE_VERSION = 2;
+export const RECIPE_VERSION = 3;
 
 /** 対象ページ。'all' または 1 始まりのページ番号の配列。 */
 export type PageSelector = 'all' | number[];
@@ -104,6 +106,8 @@ export interface PdfEditRecipe {
   graphics: RecipeGraphic[];
   watermark: WatermarkConfig;
   contentRules: ContentRule[];
+  /** 画像化による領域除去。通常編集には適用せず、専用の検証・承認経路を使う。 */
+  regionRedaction?: RegionRedactionSettings;
 }
 
 export class RecipeValidationError extends Error {
@@ -317,13 +321,16 @@ function mergeDefaults<T extends object>(defaults: T, value: unknown): T {
 }
 
 /**
- * JSON から読み込んだ値をレシピとして検証・正規化する。version 1 は 2 へ移行する。
+ * JSON から読み込んだ値をレシピとして検証・正規化する。version 1 / 2 は 3 へ移行する。
  * CLI 向けの手書き JSON を想定し、id / 日時 / 省略項目は既定値で補う。
  */
 export function parseRecipe(value: unknown): PdfEditRecipe {
   if (!isRecord(value)) throw new RecipeValidationError('レシピは JSON オブジェクトである必要があります');
-  if (value.version !== 1 && value.version !== 2) {
-    throw new RecipeValidationError('このファイルは PDF Image Tools のレシピではありません（version が 1 または 2 ではありません）');
+  if (value.version !== 1 && value.version !== 2 && value.version !== 3) {
+    throw new RecipeValidationError('このファイルは PDF Image Tools のレシピではありません（version が 1 / 2 / 3 ではありません）');
+  }
+  if (value.regionRedaction !== undefined && value.version !== 3) {
+    throw new RecipeValidationError('regionRedaction には version 3 が必要です');
   }
   const now = Date.now();
   const headerFooterSource = isRecord(value.headerFooter) ? value.headerFooter : {};
@@ -349,7 +356,19 @@ export function parseRecipe(value: unknown): PdfEditRecipe {
     contentRules: Array.isArray(value.contentRules)
       ? value.contentRules.map((rule, index) => parseContentRule(rule, `contentRules[${index}]`))
       : [],
+    ...(value.regionRedaction === undefined ? {} : { regionRedaction: parseRegionRedactionSettings(value.regionRedaction) }),
   };
+}
+
+/** 別方式の編集が同居しているレシピを黙って部分実行しない。 */
+export function requireRegionOnlyRecipe(recipe: PdfEditRecipe): RegionRedactionSettings {
+  if (!recipe.regionRedaction) throw new RecipeValidationError('領域除去設定 regionRedaction を持つ version 3 レシピが必要です');
+  if (recipe.textBoxes.length || recipe.graphics.length || recipe.contentRules.length
+    || recipe.headerFooter.header.enabled || recipe.headerFooter.footer.enabled
+    || recipe.pageNumbering.enabled || recipe.watermark.enabled) {
+    throw new RecipeValidationError('領域除去と通常編集は別のレシピに分けてください');
+  }
+  return recipe.regionRedaction;
 }
 
 export function isRecipe(value: unknown): value is PdfEditRecipe {

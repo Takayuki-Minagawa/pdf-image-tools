@@ -15,6 +15,8 @@ const bundlePath = join(root, 'dist-cli', 'pdf-image-tools.mjs');
 const fontPath = join(root, 'public', 'fonts', 'NotoSansJP.ttf');
 // pdf.js は末尾が '/' のパスを要求する（Windows でも fs は '/' 区切りを受け付ける）
 const standardFontDataUrl = join(root, 'node_modules', 'pdfjs-dist', 'standard_fonts').split('\\').join('/') + '/';
+const cMapUrl = join(root, 'node_modules', 'pdfjs-dist', 'cmaps').split('\\').join('/') + '/';
+const wasmUrl = join(root, 'node_modules', 'pdfjs-dist', 'wasm').split('\\').join('/') + '/';
 
 function newestMtime(directory) {
   let newest = 0;
@@ -50,11 +52,18 @@ if (process.argv.includes('--rebuild') || bundleIsStale()) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
+// pdf.js evaluates DOMMatrix at import time. Install real raster primitives before loading it.
+const { DOMMatrix, ImageData, Path2D } = await import('@napi-rs/canvas');
+for (const [name, value] of Object.entries({ DOMMatrix, ImageData, Path2D })) {
+  if (typeof globalThis[name] === 'undefined') globalThis[name] = value;
+}
 const { run } = await import(pathToFileURL(bundlePath).href);
 const args = process.argv.slice(2).filter((arg) => arg !== '--rebuild');
 process.exitCode = await run(args, {
   fontPath,
   standardFontDataUrl,
+  cMapUrl,
+  wasmUrl,
   stdout: (text) => process.stdout.write(text),
   stderr: (text) => process.stderr.write(text),
 });

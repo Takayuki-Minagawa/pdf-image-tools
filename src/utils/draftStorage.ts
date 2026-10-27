@@ -13,6 +13,12 @@ const DATABASE_VERSION = 1;
 const STORE_NAME = 'drafts';
 const LATEST_DRAFT_ID = 'pdf-editor-latest';
 const DRAFT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
+let draftStorageBlocked = false;
+
+/** Close the persistence gate synchronously before entering confidential preprocessing. */
+export function setPdfDraftStorageBlocked(blocked: boolean) {
+  draftStorageBlocked = blocked;
+}
 
 export interface PdfEditorDraftSnapshot {
   pageEntries: PagePlanEntry[];
@@ -52,8 +58,12 @@ function openDatabase() {
   });
 }
 
-async function runRequest<T>(mode: IDBTransactionMode, operation: (store: IDBObjectStore) => IDBRequest<T>) {
+async function runRequest<T>(mode: IDBTransactionMode, operation: (store: IDBObjectStore) => IDBRequest<T>, canRun?: () => boolean) {
   const database = await openDatabase();
+  if (canRun && !canRun()) {
+    database.close();
+    return undefined;
+  }
   return new Promise<T>((resolve, reject) => {
     const transaction = database.transaction(STORE_NAME, mode);
     const request = operation(transaction.objectStore(STORE_NAME));
@@ -81,7 +91,8 @@ async function runRequest<T>(mode: IDBTransactionMode, operation: (store: IDBObj
 }
 
 export function savePdfDraft(draft: Omit<StoredPdfDraft, 'id'>) {
-  return runRequest('readwrite', (store) => store.put({ ...draft, id: LATEST_DRAFT_ID } as StoredPdfDraft));
+  if (draftStorageBlocked) return Promise.resolve(undefined);
+  return runRequest('readwrite', (store) => store.put({ ...draft, id: LATEST_DRAFT_ID } as StoredPdfDraft), () => !draftStorageBlocked);
 }
 
 export async function loadPdfDraft() {

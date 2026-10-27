@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Combine, Image, LockKeyhole, Pencil, Trash2, X } from 'lucide-react';
+import { Combine, Image, LockKeyhole, Pencil, ShieldCheck, Trash2, X } from 'lucide-react';
 import type { ToolTab } from '../App';
 
 interface PurposeGuideProps {
@@ -9,6 +9,15 @@ interface PurposeGuideProps {
 }
 
 const PURPOSES = [
+  {
+    tab: 'region-redact',
+    title: '図面の表題欄やロゴを除去する',
+    description: '領域を指定し、全ページを画像PDFに新規化します。検証と目視承認後の出力を外部操作に渡せます。',
+    action: 'ローカル前処理を始める',
+    icon: ShieldCheck,
+    iconClass: 'bg-teal-100 text-teal-700',
+    buttonClass: 'bg-teal-700 hover:bg-teal-800 focus-visible:ring-teal-500',
+  },
   {
     tab: 'pdf-edit',
     title: 'PDFの内容を整える',
@@ -102,7 +111,7 @@ export function PurposeGuide({ open, onClose, onSelect }: PurposeGuideProps) {
           </p>
         </div>
 
-        <div className="mt-6 grid gap-3 md:grid-cols-3">
+        <div className="mt-6 grid gap-3 md:grid-cols-2">
           {PURPOSES.map((purpose) => {
             const Icon = purpose.icon;
             return (

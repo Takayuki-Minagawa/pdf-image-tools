@@ -1,4 +1,5 @@
 import JSZip from 'jszip';
+import { throwIfAborted } from './async';
 
 const MAX_ZIP_INPUT_BYTES = 300 * 1024 * 1024;
 
@@ -34,7 +35,9 @@ export async function downloadDataUrlsAsZip(
   files: Array<{ filename: string; dataUrl: string }>,
   filename: string,
   onProgress?: (progress: number) => void,
+  signal?: AbortSignal,
 ) {
+  throwIfAborted(signal);
   const estimatedBytes = files.reduce((total, file) => total + Math.ceil(file.dataUrl.length * 0.75), 0);
   if (estimatedBytes > MAX_ZIP_INPUT_BYTES) {
     throw new Error('ZIP対象が300MBを超えます。ページ範囲または解像度を小さくしてください。');
@@ -47,8 +50,9 @@ export async function downloadDataUrlsAsZip(
 
   const blob = await zip.generateAsync(
     { type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } },
-    ({ percent }) => onProgress?.(25 + percent * 0.75),
+    ({ percent }) => { throwIfAborted(signal); onProgress?.(25 + percent * 0.75); },
   );
+  throwIfAborted(signal);
   downloadBlob(blob, filename.endsWith('.zip') ? filename : `${filename}.zip`);
   return blob.size;
 }
@@ -57,7 +61,9 @@ export async function downloadBinaryFilesAsZip(
   files: Array<{ filename: string; data: Blob | ArrayBuffer | Uint8Array }>,
   filename: string,
   onProgress?: (progress: number) => void,
+  signal?: AbortSignal,
 ) {
+  throwIfAborted(signal);
   const totalBytes = files.reduce((total, file) => {
     if (file.data instanceof Blob) return total + file.data.size;
     return total + file.data.byteLength;
@@ -69,8 +75,9 @@ export async function downloadBinaryFilesAsZip(
   files.forEach((file) => zip.file(file.filename, file.data));
   const blob = await zip.generateAsync(
     { type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } },
-    ({ percent }) => onProgress?.(percent),
+    ({ percent }) => { throwIfAborted(signal); onProgress?.(percent); },
   );
+  throwIfAborted(signal);
   downloadBlob(blob, filename.endsWith('.zip') ? filename : `${filename}.zip`);
   return blob.size;
 }

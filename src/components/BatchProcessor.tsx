@@ -5,6 +5,8 @@ import { ProgressBar } from './ProgressBar';
 import { applyRecipeToPdf } from '../utils/recipeApply';
 import { loadRecipes, subscribeRecipeChanges } from '../utils/recipeStorage';
 import { downloadBinaryFilesAsZip, sanitizeFilename } from '../utils/download';
+import { isAbortError, throwIfAborted } from '../utils/async';
+import { useOperationLifetime } from '../hooks/useOperationLifetime';
 
 interface BatchFile {
   id: string;
@@ -24,6 +26,8 @@ export default function BatchProcessor() {
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState('');
   const cancelledRef = useRef(false);
+  const operationRef = useRef<AbortController | null>(null);
+  const getOperationSignal = useOperationLifetime();
   const selectedRecipe = useMemo(() => recipes.find((recipe) => recipe.id === recipeId), [recipeId, recipes]);
 
   useEffect(() => subscribeRecipeChanges(() => {
@@ -47,6 +51,13 @@ export default function BatchProcessor() {
 
   const processFiles = async () => {
     if (!selectedRecipe || files.length === 0) return;
+    const lifetime = getOperationSignal();
+    if (lifetime.aborted) return;
+    const operation = new AbortController();
+    operationRef.current = operation;
+    const stop = () => operation.abort();
+    lifetime.addEventListener('abort', stop, { once: true });
+    const signal = operation.signal;
     cancelledRef.current = false;
     setIsProcessing(true);
     setProgress(0);
@@ -55,12 +66,15 @@ export default function BatchProcessor() {
     const usedNames = new Set<string>();
     try {
       for (let index = 0; index < files.length; index++) {
+        throwIfAborted(signal);
         if (cancelledRef.current) break;
         const item = files[index];
         setFiles((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'processing', error: undefined } : entry));
         try {
           const source = await item.file.arrayBuffer();
+          throwIfAborted(signal);
           const { bytes: edited, unmatched } = await applyRecipeToPdf(source, selectedRecipe, { fileName: item.file.name });
+          throwIfAborted(signal);
           const warning = unmatched.length > 0 ? `編集ルール${unmatched.length}件が一致しませんでした` : undefined;
           const baseName = `${sanitizeFilename(item.file.name.replace(/\.pdf$/i, ''), 'document')}_edited`;
           let filename = `${baseName}.pdf`;
@@ -70,6 +84,7 @@ export default function BatchProcessor() {
           results.push({ filename, data: edited });
           setFiles((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'done', warning } : entry));
         } catch (error) {
+          if (isAbortError(error)) throw error;
           const reason = error instanceof Error ? error.message : '処理できませんでした';
           setFiles((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'error', error: reason } : entry));
         }
@@ -77,15 +92,18 @@ export default function BatchProcessor() {
       }
 
       if (!cancelledRef.current && results.length > 0) {
-        const size = await downloadBinaryFilesAsZip(results, sanitizeFilename(outputName, 'pdf-batch-results'), (zipProgress) => setProgress(85 + zipProgress * 0.15));
+        const size = await downloadBinaryFilesAsZip(results, sanitizeFilename(outputName, 'pdf-batch-results'), (zipProgress) => setProgress(85 + zipProgress * 0.15), signal);
         setMessage(`${results.length}件を処理し、${(size / 1024 / 1024).toFixed(1)} MBのZIPを保存しました`);
       } else if (cancelledRef.current) {
         setMessage('バッチ処理をキャンセルしました');
       }
     } catch (error) {
+      if (isAbortError(error)) { if (!lifetime.aborted) setMessage('バッチ処理をキャンセルしました'); return; }
       setMessage(error instanceof Error ? `ZIPを作成できませんでした: ${error.message}` : 'ZIPを作成できませんでした');
     } finally {
-      setIsProcessing(false);
+      lifetime.removeEventListener('abort', stop);
+      if (operationRef.current === operation) operationRef.current = null;
+      if (!lifetime.aborted) setIsProcessing(false);
     }
   };
 
@@ -119,7 +137,7 @@ export default function BatchProcessor() {
       {isProcessing && <ProgressBar progress={progress} label="レシピを適用中..." />}
       <div className="flex gap-2">
         <button type="button" onClick={() => void processFiles()} disabled={!selectedRecipe || files.length === 0 || isProcessing} className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-3 font-medium text-white hover:bg-cyan-800 disabled:opacity-40"><Play className="h-5 w-5" />バッチ処理を開始</button>
-        {isProcessing ? <button type="button" onClick={() => { cancelledRef.current = true; }} className="flex items-center gap-2 rounded-lg border border-red-300 px-4 py-3 text-red-700"><Square className="h-4 w-4" />停止</button> : <button type="button" onClick={() => { setFiles((current) => current.map((item) => ({ ...item, status: 'ready', error: undefined, warning: undefined }))); setProgress(0); setMessage(''); }} className="flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-3 text-gray-700"><RotateCcw className="h-4 w-4" />状態をリセット</button>}
+        {isProcessing ? <button type="button" onClick={() => { cancelledRef.current = true; operationRef.current?.abort(); }} className="flex items-center gap-2 rounded-lg border border-red-300 px-4 py-3 text-red-700"><Square className="h-4 w-4" />停止</button> : <button type="button" onClick={() => { setFiles((current) => current.map((item) => ({ ...item, status: 'ready', error: undefined, warning: undefined }))); setProgress(0); setMessage(''); }} className="flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-3 text-gray-700"><RotateCcw className="h-4 w-4" />状態をリセット</button>}
       </div>
       {message && <p className="rounded-lg bg-green-50 p-3 text-sm text-green-700" role="status">{message}</p>}
     </div>
