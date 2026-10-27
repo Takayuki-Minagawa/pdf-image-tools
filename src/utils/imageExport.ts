@@ -48,9 +48,12 @@ export function resolveImageExportPageIndices(
 export function downloadImagesAsZip(
   images: Array<{ pageNumber: number; dataUrl: string }>,
   options: Pick<PdfImageExportOptions, 'filename' | 'format'>,
+  signal?: AbortSignal,
 ) {
   return downloadDataUrlsAsZip(
     images.map((image) => ({ filename: imageExportFileName(options, image.pageNumber), dataUrl: image.dataUrl })),
     imageExportBaseName(options),
+    undefined,
+    signal,
   );
 }

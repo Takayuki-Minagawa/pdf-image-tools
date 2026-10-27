@@ -22,7 +22,8 @@ import {
   readStoredOutputName,
 } from '../utils/imageToPdfSettings';
 import { moveItem } from '../utils/arrayUtils';
-import { nextFrame } from '../utils/async';
+import { isAbortError, nextFrame, throwIfAborted } from '../utils/async';
+import { useOperationLifetime } from '../hooks/useOperationLifetime';
 import { sendPdfToEditor } from '../utils/workflowHandoff';
 import { downloadBlob } from '../utils/download';
 import type {
@@ -49,6 +50,7 @@ export default function ImageToPdfConverter() {
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [cropEditorId, setCropEditorId] = useState<string | null>(null);
   const [lastPdfBlob, setLastPdfBlob] = useState<Blob | null>(null);
+  const getOperationSignal = useOperationLifetime();
 
   useEffect(() => {
     localStorage.setItem(IMAGE_TO_PDF_SETTINGS_STORAGE_KEY, JSON.stringify(options));
@@ -68,6 +70,8 @@ export default function ImageToPdfConverter() {
   );
 
   const handleDrop = useCallback(async (files: File[]) => {
+    const signal = getOperationSignal();
+    if (signal.aborted) return;
     setError(null);
     setNotice(null);
     const imageFiles = files.filter(isSupportedImageFile);
@@ -99,12 +103,16 @@ export default function ImageToPdfConverter() {
     let failedCount = 0;
     // 高解像度画像を同時展開するとメモリが急増するため、1件ずつデコードする。
     for (const file of accepted) {
+      if (signal.aborted) return;
       try {
-        loadedImages.push(await loadImage(file));
+        const image = await loadImage(file);
+        if (signal.aborted) return;
+        loadedImages.push(image);
       } catch {
         failedCount += 1;
       }
       await nextFrame();
+      if (signal.aborted) return;
     }
 
     if (loadedImages.length > 0) {
@@ -116,7 +124,7 @@ export default function ImageToPdfConverter() {
     if (deduplicated.duplicateCount > 0) {
       setNotice(`${deduplicated.duplicateCount}件の重複画像を除外しました`);
     }
-  }, [images]);
+  }, [getOperationSignal, images]);
 
   const handleRemove = useCallback((id: string) => {
     setImages((previous) => previous.filter((image) => image.id !== id));
@@ -133,6 +141,8 @@ export default function ImageToPdfConverter() {
   }, []);
 
   const handleConvert = useCallback(async () => {
+    const signal = getOperationSignal();
+    if (signal.aborted) return;
     if (images.length === 0) {
       setError('画像を追加してください');
       return;
@@ -144,18 +154,20 @@ export default function ImageToPdfConverter() {
     setNotice(null);
 
     try {
-      const pdfBlob = await imagesToPdf(images, setProgress, options);
+      const pdfBlob = await imagesToPdf(images, (value) => { if (!signal.aborted) setProgress(value); }, options, signal);
+      throwIfAborted(signal);
       setLastPdfBlob(pdfBlob);
       const fileName = normalizePdfFileName(outputName);
       downloadBlob(pdfBlob, fileName);
       setNotice(`${fileName} を作成しました`);
     } catch (conversionError) {
+      if (signal.aborted || isAbortError(conversionError)) return;
       setError('PDFの作成中にエラーが発生しました。画像や設定を確認して再試行してください。');
       console.error(conversionError);
     } finally {
-      setIsConverting(false);
+      if (!signal.aborted) setIsConverting(false);
     }
-  }, [images, options, outputName]);
+  }, [getOperationSignal, images, options, outputName]);
 
   const reverseOrder = () => setImages((previous) => [...previous].reverse());
 
@@ -290,7 +302,7 @@ export default function ImageToPdfConverter() {
               {lastPdfBlob && (
                 <button
                   type="button"
-                  onClick={() => sendPdfToEditor(lastPdfBlob, normalizePdfFileName(outputName))}
+                  onClick={() => { if (!getOperationSignal().aborted) sendPdfToEditor(lastPdfBlob, normalizePdfFileName(outputName)); }}
                   className="flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-amber-800 hover:bg-amber-100"
                 >
                   <Send className="h-4 w-4" />続けて編集

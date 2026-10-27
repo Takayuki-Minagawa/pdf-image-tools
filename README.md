@@ -121,7 +121,7 @@
 npm run cli -- redact-regions input.pdf candidate.pdf regions.json --report candidate-report.json
 ```
 
-CLIもブラウザーと同じ処理・検証関数を使いますが、保存するのは**未承認の候補**です。ローカルで全ページを確認してから、別の承認済みフォルダーへ移してください。入力や既存の出力・レポートは上書きしません。CLIのNode canvasは `@napi-rs/canvas`（MIT）を使用します。
+CLIは原本128 MiB・レシピ1 MiBの上限を読込み前に確認します。CLIもブラウザーと同じ処理・検証関数を使いますが、保存するのは**未承認の候補**です。ローカルで全ページを確認してから、別の承認済みフォルダーへ移してください。入力や既存の出力・レポートは上書きしません。CLIのNode canvasは `@napi-rs/canvas`（MIT）を使用します。
 
 ローカル検証は `npm run check` でLint・単体テスト・ビルド・ブラウザーテストを実行できます。ブラウザーテストは既定でインストール済みGoogle Chromeを使います。Playwright同梱Chromiumを使う場合は `npx playwright install chromium` の後、`PLAYWRIGHT_CHANNEL=chromium npm run test:e2e` を実行してください。テスト用PDFはすべて人工データです。GitHub Actionsは手動起動のみとし、Pages公開をマージ後に実行します。
 

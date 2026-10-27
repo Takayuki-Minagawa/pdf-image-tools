@@ -4,6 +4,7 @@
  * scripts/pdf-image-tools.mjs から起動する。
  */
 import { mkdir, open, readFile, realpath, unlink, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { Buffer } from 'node:buffer';
 import { jsPDF } from 'jspdf';
@@ -12,6 +13,7 @@ import { setFontBytesSource } from '../utils/fontLoader';
 import { setPdfjsDocumentOptions } from '../utils/pdfjsDocumentOptions';
 import { parseRecipe, RecipeValidationError, requireRegionOnlyRecipe, type RecipeGraphic } from '../types/recipe';
 import { rasterizeAndVerify, type RasterCanvasFactory } from '../utils/regionRedaction';
+import { REGION_REDACTION_LIMITS } from '../types/regionRedaction';
 import { describeContentRule } from '../utils/contentRules';
 import { RedactionVerificationError } from '../utils/contentEditOperations';
 import {
@@ -153,14 +155,41 @@ function createImageResolver(recipePath: string) {
   };
 }
 
-async function loadRecipe(path: string) {
+async function loadRecipe(path: string, text?: string) {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await readFile(path, 'utf8'));
+    parsed = JSON.parse(text ?? await readFile(path, 'utf8'));
   } catch (error) {
     throw new Error(`レシピ JSON を読み込めません: ${path} (${error instanceof Error ? error.message : String(error)})`);
   }
   return parseRecipe(parsed);
+}
+
+/** Secure inputs are bounded before allocation and never read beyond that initial size + 1.
+ * The extra byte and second stat detect growth; a short read detects truncation. Opening
+ * nonblocking also permits rejecting FIFOs/devices instead of waiting for a writer.
+ */
+export async function readBoundedRegionInput(path: string, maximumBytes: number): Promise<Buffer> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const initial = await handle.stat();
+    if (!initial.isFile() || !Number.isSafeInteger(initial.size) || initial.size > maximumBytes) {
+      throw new Error('入力ファイルが処理上限を超えているか、通常のファイルではありません');
+    }
+    const bytes = Buffer.alloc(initial.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (bytesRead === 0) throw new Error('読込み中に入力ファイルが変更されました');
+      offset += bytesRead;
+    }
+    const { bytesRead: extra } = await handle.read(Buffer.alloc(1), 0, 1, offset);
+    const after = await handle.stat();
+    if (extra !== 0 || after.size !== initial.size || after.mtimeMs !== initial.mtimeMs) {
+      throw new Error('読込み中に入力ファイルが変更されました');
+    }
+    return bytes;
+  } finally { await handle.close(); }
 }
 
 /** Reserve both paths exclusively: source aliases, symlinks and hardlinks cannot be overwritten. */
@@ -201,7 +230,8 @@ export async function writeRegionCandidate(
 
 async function redactRegions(input: string, output: string, recipePath: string, reportPath: string, env: CliEnvironment) {
   try {
-    const recipe = await loadRecipe(recipePath);
+    const recipeBytes = await readBoundedRegionInput(recipePath, 1024 * 1024);
+    const recipe = await loadRecipe(recipePath, recipeBytes.toString('utf8'));
     const settings = requireRegionOnlyRecipe(recipe);
     const { createCanvas } = await import('@napi-rs/canvas');
     const canvasFactory: RasterCanvasFactory = (width, height) => {
@@ -213,7 +243,7 @@ async function redactRegions(input: string, output: string, recipePath: string, 
         dispose: () => { canvas.width = 1; canvas.height = 1; },
       };
     };
-    const source = new Uint8Array(await readFile(input));
+    const source = new Uint8Array(await readBoundedRegionInput(input, REGION_REDACTION_LIMITS.maxInputBytes));
     const result = await rasterizeAndVerify(source, settings, {
       canvasFactory,
       documentOptions: {

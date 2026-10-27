@@ -62,8 +62,19 @@ async function openDocument(bytes: ArrayBuffer | Uint8Array, options: RegionReda
   });
   const cancel = () => { void task.destroy().catch(() => undefined); };
   options.signal?.addEventListener('abort', cancel, { once: true });
-  try { return await task.promise; }
-  catch { options.signal?.throwIfAborted(); throw new Error('PDF を読み込めません。破損または暗号化された PDF は処理できません'); }
+  try {
+    const document = await task.promise;
+    // An empty user password opens without a password challenge, but is still an
+    // encrypted input. Reject it as well as password-protected documents.
+    if (await document.getPermissions() !== null) throw new Error('encrypted input');
+    options.signal?.throwIfAborted();
+    return document;
+  } catch {
+    // Failed loading tasks also own worker-side document data and must be released.
+    await task.destroy().catch(() => undefined);
+    options.signal?.throwIfAborted();
+    throw new Error('PDF を読み込めません。破損または暗号化された PDF は処理できません');
+  }
   finally { options.signal?.removeEventListener('abort', cancel); }
 }
 
@@ -177,10 +188,21 @@ export async function rasterizeAndVerify(bytes: ArrayBuffer | Uint8Array, input:
       const width = Math.ceil(viewport.width), height = Math.ceil(viewport.height);
       const surface = factory(width, height);
       try {
-        const render = page.render({ canvas: surface.canvas, canvasContext: surface.context, viewport, annotationMode: pdfjs.AnnotationMode.DISABLE, background: '#ffffff' });
-        const cancel = () => render.cancel();
-        options.signal?.addEventListener('abort', cancel, { once: true });
-        try { await render.promise; } finally { options.signal?.removeEventListener('abort', cancel); }
+        // The integer canvas can extend beyond a fractional CropBox. Clip before
+        // rendering so content outside the visible page cannot enter edge pixels.
+        // Initialize the padding first, and restore our clip before redaction.
+        surface.context.fillStyle = '#ffffff';
+        surface.context.fillRect(0, 0, width, height);
+        surface.context.save();
+        surface.context.beginPath();
+        surface.context.rect(0, 0, viewport.width, viewport.height);
+        surface.context.clip();
+        try {
+          const render = page.render({ canvas: surface.canvas, canvasContext: surface.context, viewport, annotationMode: pdfjs.AnnotationMode.DISABLE, background: '#ffffff' });
+          const cancel = () => render.cancel();
+          options.signal?.addEventListener('abort', cancel, { once: true });
+          try { await render.promise; } finally { options.signal?.removeEventListener('abort', cancel); }
+        } finally { surface.context.restore(); }
         options.signal?.throwIfAborted();
         const imageData = surface.context.getImageData(0, 0, width, height);
         replaceRegionPixels(imageData.data, width, height, settings.regions.filter((region) => region.pages.includes(info.pageNumber)), settings.dpi);
@@ -204,7 +226,12 @@ export async function rasterizeAndVerify(bytes: ArrayBuffer | Uint8Array, input:
         const image = await output.embedPng(png);
         if (image.width !== width || image.height !== height) throw new Error('符号化画像の寸法が一致しません');
         const newPage = output.addPage([info.width, info.height]);
-        newPage.drawImage(image, { x: 0, y: 0, width: info.width, height: info.height });
+        // ceil(viewport dimensions) adds a fractional edge pixel. Keep the image's
+        // actual DPI and align its top-left, letting the page clip that padding.
+        // Stretching it to info.width/height would shift the selected mask inward.
+        const rasterWidth = width * 72 / settings.dpi;
+        const rasterHeight = height * 72 / settings.dpi;
+        newPage.drawImage(image, { x: 0, y: info.height - rasterHeight, width: rasterWidth, height: rasterHeight });
         newPage.node.delete(PDFName.of('Annots'));
         await image.embed(); // Release PNG decoder buffers before rendering the next page.
         const content = newPage.node.lookup(PDFName.of('Contents'), PDFArray).lookup(0);

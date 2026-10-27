@@ -1,7 +1,8 @@
 import { useCallback, useRef, useState } from 'react';
 import type { PdfImageExportOptions } from '../types/pdfEdit';
 import { pageRangeToIndices } from '../utils/arrayUtils';
-import { isAbortError } from '../utils/async';
+import { isAbortError, throwIfAborted } from '../utils/async';
+import { useOperationLifetime } from './useOperationLifetime';
 import { RedactionVerificationError } from '../utils/contentEditOperations';
 import { sanitizeFilename } from '../utils/download';
 import { formatBytes, getErrorMessage } from '../utils/format';
@@ -63,6 +64,7 @@ export function usePdfEditorOutput({
   // 完全削除を検証した編集内容の署名と日時。編集内容が変われば未検証として扱う。
   const [redactionVerification, setRedactionVerification] = useState<{ signature: string; at: number } | null>(null);
   const exportAbortRef = useRef<AbortController | null>(null);
+  const getOperationSignal = useOperationLifetime();
 
   const redactionVerifiedAt = hasRedactions && redactionVerification?.signature === snapshotSignature
     ? redactionVerification.at
@@ -90,6 +92,8 @@ export function usePdfEditorOutput({
 
   const extractRange = async (allowCoverOnly = false) => {
     if (!sourceFileName) return;
+    const signal = getOperationSignal();
+    if (signal.aborted) return;
 
     const start = parseInt(extractStart, 10);
     const end = parseInt(extractEnd, 10);
@@ -107,31 +111,41 @@ export function usePdfEditorOutput({
 
     try {
       const editedPdf = await buildEditedPdf(allowCoverOnly);
+      throwIfAborted(signal);
       const extractedPdf = await extractPdfPageIndices(editedPdf, pageRangeToIndices(start, end));
+      throwIfAborted(signal);
       downloadPdf(extractedPdf, `${sourceFileName.replace('.pdf', '')}_pages_${start}-${end}.pdf`);
       setRedactionFailure(null);
     } catch (err) {
+      if (signal.aborted || isAbortError(err)) return;
       reportFailure(err, 'extract-range', (error) => '抽出中にエラーが発生しました: ' + getErrorMessage(error));
     }
   };
 
   const extractSelected = async (allowCoverOnly = false) => {
     if (selectedPages.size === 0) return;
+    const signal = getOperationSignal();
+    if (signal.aborted) return;
     setOutputError(null);
     try {
       const editedPdf = await buildEditedPdf(allowCoverOnly);
+      throwIfAborted(signal);
       const pageIndices = [...selectedPages].sort((a, b) => a - b);
       const extractedPdf = await extractPdfPageIndices(editedPdf, pageIndices);
+      throwIfAborted(signal);
       downloadPdf(extractedPdf, `${sanitizeFilename(outputName, 'selected-pages')}_selected.pdf`);
       setRedactionFailure(null);
       setOutputMessage(`${pageIndices.length}ページを抽出しました`);
     } catch (error) {
+      if (signal.aborted || isAbortError(error)) return;
       reportFailure(error, 'extract-selected', (reason) => getErrorMessage(reason, '選択ページを抽出できませんでした'));
     }
   };
 
   const savePdf = async (allowCoverOnly = false) => {
     if (!sourceFileName) return;
+    const signal = getOperationSignal();
+    if (signal.aborted) return;
 
     setIsSavingPdf(true);
     setOutputError(null);
@@ -139,8 +153,10 @@ export function usePdfEditorOutput({
 
     try {
       const result = await buildEditedPdf(allowCoverOnly);
+      throwIfAborted(signal);
       const filename = `${sanitizeFilename(outputName, 'edited')}.pdf`;
       await beforeSaveDownload();
+      throwIfAborted(signal);
       downloadPdf(result, filename);
       onSaved();
       setRedactionFailure(null);
@@ -149,14 +165,17 @@ export function usePdfEditorOutput({
         : null);
       setOutputMessage(`${filename}（${formatBytes(result.byteLength)}）を保存しました`);
     } catch (err) {
+      if (signal.aborted || isAbortError(err)) return;
       reportFailure(err, 'save', (error) => 'PDF保存中にエラーが発生しました: ' + getErrorMessage(error));
     } finally {
-      setIsSavingPdf(false);
+      if (!signal.aborted) setIsSavingPdf(false);
     }
   };
 
   const exportImages = async (allowCoverOnly = false) => {
     if (!sourceFileName) return;
+    const signal = getOperationSignal();
+    if (signal.aborted) return;
 
     setIsExportingImages(true);
     setOutputError(null);
@@ -165,9 +184,12 @@ export function usePdfEditorOutput({
     setImages([]);
     const controller = new AbortController();
     exportAbortRef.current = controller;
+    const stop = () => controller.abort();
+    signal.addEventListener('abort', stop, { once: true });
 
     try {
       const result = await buildEditedPdf(allowCoverOnly);
+      throwIfAborted(signal);
       const pageIndices = resolveImageExportPageIndices(imageExportOptions, selectedPages, pageCount);
       const converted = await pdfBytesToImages(result, {
         scale: imageExportOptions.scale,
@@ -177,23 +199,27 @@ export function usePdfEditorOutput({
         onProgress: setImageProgress,
         signal: controller.signal,
       });
+      throwIfAborted(signal);
+      throwIfAborted(controller.signal);
       setImages(converted);
       setRedactionFailure(null);
       if (imageExportOptions.zip && converted.length > 1) {
-        await downloadImagesAsZip(converted, imageExportOptions);
+        await downloadImagesAsZip(converted, imageExportOptions, controller.signal);
         setOutputMessage(`${converted.length}ページをZIPで保存しました`);
       } else {
         setOutputMessage(`${converted.length}ページの画像を生成しました`);
       }
     } catch (err) {
+      if (signal.aborted) return;
       if (isAbortError(err)) {
         setOutputMessage('画像出力をキャンセルしました');
       } else {
         reportFailure(err, 'export-images', (error) => '画像出力中にエラーが発生しました: ' + getErrorMessage(error));
       }
     } finally {
-      setIsExportingImages(false);
-      exportAbortRef.current = null;
+      signal.removeEventListener('abort', stop);
+      if (!signal.aborted) setIsExportingImages(false);
+      if (exportAbortRef.current === controller) exportAbortRef.current = null;
     }
   };
 
@@ -219,12 +245,13 @@ export function usePdfEditorOutput({
 
   const downloadImage = useCallback(
     (image: ConvertedImage) => {
+      if (getOperationSignal().aborted) return;
       const link = document.createElement('a');
       link.href = image.dataUrl;
       link.download = imageExportFileName(imageExportOptions, image.pageNumber);
       link.click();
     },
-    [imageExportOptions],
+    [getOperationSignal, imageExportOptions],
   );
 
   const downloadAllImages = useCallback(async () => {
@@ -232,8 +259,10 @@ export function usePdfEditorOutput({
       downloadImage(images[0]);
       return;
     }
-    await downloadImagesAsZip(images, imageExportOptions);
-  }, [downloadImage, imageExportOptions, images]);
+    const signal = getOperationSignal();
+    try { await downloadImagesAsZip(images, imageExportOptions, signal); }
+    catch (error) { if (!signal.aborted && !isAbortError(error)) setOutputError(getErrorMessage(error)); }
+  }, [downloadImage, getOperationSignal, imageExportOptions, images, setOutputError]);
 
   return {
     isSavingPdf,

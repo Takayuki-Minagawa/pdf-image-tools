@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { PDFDocument, PDFName } from 'pdf-lib';
+import { PDFDict, PDFDocument, PDFName, PDFRawStream, decodePDFRawStream, rgb } from 'pdf-lib';
 import { syntheticDrawing } from './fixtures';
 
 async function openPreprocessor(page: Page) {
@@ -172,4 +172,49 @@ test('production service worker caches only program assets and preprocessing wor
     expect(cacheKeys.length).toBeGreaterThan(0);
     expect(cacheKeys.every((key) => !/PRIVATE|\.pdf($|\?)/i.test(key))).toBe(true);
   } finally { await context.close(); }
+});
+
+test('pointer region selection and narrow-screen controls remain operable', async ({ page }) => {
+  await openPreprocessor(page);
+  await page.locator('#region-source-file').setInputFiles({ name: 'drawing.pdf', mimeType: 'application/pdf', buffer: await syntheticDrawing() });
+  const overlay = page.locator('svg[aria-label^="領域指定プレビュー"]');
+  await expect(overlay).toBeVisible();
+  const box = (await overlay.boundingBox())!;
+  await page.mouse.move(box.x + box.width * 0.1, box.y + box.height * 0.1);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.3, { steps: 5 });
+  await page.mouse.up();
+  expect(Number(await page.locator('#region-x').inputValue())).toBeCloseTo(40 * 25.4 / 72, 1);
+  expect(Number(await page.locator('#region-width').inputValue())).toBeCloseTo(160 * 25.4 / 72, 1);
+  await page.locator('#region-add').click();
+  await expect(page.getByText('確定した除去領域（1）')).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole('tab', { name: '領域除去', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.locator('#region-width').focus();
+  await page.keyboard.press('Tab');
+  await expect(page.locator('#region-height')).toBeFocused();
+  await page.screenshot({ path: 'test-results/mobile-region.png', fullPage: true });
+});
+
+test('fractional CropBox never includes pixels from outside the visible page', async ({ page }) => {
+  const pdf = await PDFDocument.create();
+  const sourcePage = pdf.addPage([110, 110]);
+  sourcePage.setCropBox(0, 20, 100.1, 80.1);
+  sourcePage.drawRectangle({ x: 100.2, y: 20, width: 0.8, height: 80, color: rgb(0, 0, 0) });
+  sourcePage.drawRectangle({ x: 0, y: 19.1, width: 100, height: 0.8, color: rgb(0, 0, 0) });
+  await openPreprocessor(page);
+  await page.locator('#region-source-file').setInputFiles({ name: 'crop.pdf', mimeType: 'application/pdf', buffer: Buffer.from(await pdf.save()) });
+  await expect(page.locator('#region-process')).toBeEnabled();
+  await page.locator('#region-dpi').selectOption('72');
+  await page.locator('#region-process').click();
+  await expect(page.locator('#region-review-page')).toBeEnabled();
+  await page.locator('#region-review-page').click();
+  await page.locator('#region-approval').check();
+  const [download] = await Promise.all([page.waitForEvent('download'), page.locator('#region-save-approved').click()]);
+  const output = await PDFDocument.load(await readFile((await download.path())!), { updateMetadata: false });
+  const objects = output.getPage(0).node.lookup(PDFName.of('Resources'), PDFDict).lookup(PDFName.of('XObject'), PDFDict);
+  const image = objects.lookup(objects.keys()[0], PDFRawStream);
+  expect(decodePDFRawStream(image).decode().every((value) => value === 255)).toBe(true);
+  expect(output.getPage(0).getSize()).toEqual({ width: 100.1, height: 80.1 });
 });

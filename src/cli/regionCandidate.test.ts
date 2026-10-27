@@ -1,9 +1,11 @@
-import { mkdtemp, readFile, rm, symlink, writeFile, access, link } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, symlink, writeFile, access, link, open, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Buffer } from 'node:buffer';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
-import { run, writeRegionCandidate } from './main';
+import { readBoundedRegionInput, run, writeRegionCandidate } from './main';
+import { REGION_REDACTION_LIMITS } from '../types/regionRedaction';
 
 const directories: string[] = [];
 
@@ -89,5 +91,54 @@ describe('redact-regions command', () => {
     expect(report).not.toMatch(/PRIVATE|secret-filename/);
     expect(stdout.join('')).toMatch(/not approved/);
     expect(new Uint8Array(await readFile(input))).toEqual(source);
+  });
+});
+
+
+describe('bounded secure input', () => {
+  it('rejects a sparse oversized PDF before allocating its contents and leaves the source intact', async () => {
+    const root = await directory();
+    const input = join(root, 'private-oversized.pdf');
+    const handle = await open(input, 'wx');
+    const size = REGION_REDACTION_LIMITS.maxInputBytes + 1;
+    await handle.write('PRIVATE-SOURCE');
+    await handle.truncate(size);
+    await handle.close();
+    const allocate = vi.spyOn(Buffer, 'alloc');
+    try {
+      await expect(readBoundedRegionInput(input, REGION_REDACTION_LIMITS.maxInputBytes)).rejects.toThrow(/上限/);
+      expect(allocate.mock.calls).toHaveLength(0);
+    } finally { allocate.mockRestore(); }
+    const recipe = join(root, 'recipe.json');
+    await writeFile(recipe, JSON.stringify({ version: 3, regionRedaction: { version: 1, dpi: 72, regions: [] } }));
+    const messages: string[] = [];
+    const output = join(root, 'candidate.pdf');
+    expect(await run(['redact-regions', input, output, recipe], { fontPath: '', stdout: (message) => messages.push(message), stderr: (message) => messages.push(message) })).toBe(1);
+    expect(messages.join('')).not.toMatch(/private-oversized|PRIVATE-SOURCE/);
+    await expect(access(output)).rejects.toThrow();
+    expect((await stat(input)).size).toBe(size);
+    const original = await open(input, 'r');
+    try {
+      const prefix = Buffer.alloc(14);
+      await original.read(prefix, 0, prefix.length, 0);
+      expect(prefix.toString()).toBe('PRIVATE-SOURCE');
+    } finally { await original.close(); }
+  });
+
+  it('bounds recipe files to 1 MiB and rejects nonregular input files', async () => {
+    const root = await directory();
+    await expect(readBoundedRegionInput(root, 1024)).rejects.toThrow(/通常のファイル/);
+    const input = join(root, 'small.pdf');
+    await writeFile(input, 'unchanged');
+    const recipe = join(root, 'private-recipe.json');
+    const handle = await open(recipe, 'wx');
+    await handle.truncate(1024 * 1024 + 1);
+    await handle.close();
+    const messages: string[] = [];
+    const output = join(root, 'candidate.pdf');
+    expect(await run(['redact-regions', input, output, recipe], { fontPath: '', stdout: (message) => messages.push(message), stderr: (message) => messages.push(message) })).toBe(1);
+    expect(messages.join('')).not.toContain('private-recipe');
+    await expect(access(output)).rejects.toThrow();
+    expect(await readFile(input, 'utf8')).toBe('unchanged');
   });
 });
