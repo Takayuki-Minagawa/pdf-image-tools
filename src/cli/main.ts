@@ -3,14 +3,15 @@
  * 同じユーティリティ（src/utils）を使う。vite.cli.config.ts で dist-cli/ へバンドルし、
  * scripts/pdf-image-tools.mjs から起動する。
  */
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { basename, dirname, extname, resolve } from 'node:path';
+import { mkdir, open, readFile, realpath, unlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { Buffer } from 'node:buffer';
 import { jsPDF } from 'jspdf';
 import { imageSize } from 'image-size';
 import { setFontBytesSource } from '../utils/fontLoader';
 import { setPdfjsDocumentOptions } from '../utils/pdfjsDocumentOptions';
-import { parseRecipe, RecipeValidationError, type RecipeGraphic } from '../types/recipe';
+import { parseRecipe, RecipeValidationError, requireRegionOnlyRecipe, type RecipeGraphic } from '../types/recipe';
+import { rasterizeAndVerify, type RasterCanvasFactory } from '../utils/regionRedaction';
 import { describeContentRule } from '../utils/contentRules';
 import { RedactionVerificationError } from '../utils/contentEditOperations';
 import {
@@ -36,6 +37,7 @@ Usage:
   pdf-image-tools add-text <input.pdf> <output.pdf> <text> [options]
   pdf-image-tools inspect <input.pdf> [--pages <pages>] [--kinds all|text|paths] [--out result.json]
   pdf-image-tools apply-recipe <input.pdf> <output.pdf> <recipe.json> [--allow-cover-only]
+  pdf-image-tools redact-regions <input.pdf> <candidate.pdf> <recipe.json> [--report candidate-report.json]
 
 Page syntax:
   1-3,5,8    Ranges and individual pages are 1-based.
@@ -53,9 +55,18 @@ inspect:
   can be used in recipe contentRules to target an element precisely.
 
 apply-recipe:
-  Applies a recipe JSON exported from the editor (or written by hand, version 2):
+  Applies an ordinary recipe JSON exported from the editor (version 1 / 2 / 3):
   textBoxes, headerFooter, pageNumbering, graphics (imagePath relative to the recipe),
   watermark and contentRules (replace / delete / redact text, restyle / delete paths).
+
+redact-regions:
+  Uses a version 3 regionRedaction recipe to rebuild every page as a new image PDF.
+  Rectangles use displayed top-left coordinates in physical pt; paper sizes must match.
+  Annotations and forms are excluded. Vector content and searchable text are lost.
+  Writes a verified CANDIDATE and a minimal JSON report; never approves or shares it.
+  Open every candidate page locally and confirm removal before copying only the checked
+  output into a separate approved workspace. Original access is not restricted by this CLI.
+  Neither output may already exist. Default report: <candidate.pdf>.report.json.
 
 Examples:
   pdf-image-tools merge combined.pdf cover.pdf body.pdf
@@ -71,6 +82,8 @@ export interface CliEnvironment {
   fontPath: string;
   /** pdfjs-dist/standard_fonts/ のディレクトリ（末尾区切り付き）。標準14フォントのメトリクス取得に使う */
   standardFontDataUrl?: string;
+  cMapUrl?: string;
+  wasmUrl?: string;
   stdout: (text: string) => void;
   stderr: (text: string) => void;
 }
@@ -148,6 +161,78 @@ async function loadRecipe(path: string) {
     throw new Error(`レシピ JSON を読み込めません: ${path} (${error instanceof Error ? error.message : String(error)})`);
   }
   return parseRecipe(parsed);
+}
+
+/** Reserve both paths exclusively: source aliases, symlinks and hardlinks cannot be overwritten. */
+export async function writeRegionCandidate(
+  output: string,
+  reportPath: string,
+  bytes: Uint8Array,
+  report: unknown,
+) {
+  const candidate = resolve(output);
+  const reportOutput = resolve(reportPath);
+  await mkdir(dirname(candidate), { recursive: true });
+  await mkdir(dirname(reportOutput), { recursive: true });
+  const canonicalCandidate = join(await realpath(dirname(candidate)), basename(candidate));
+  const canonicalReport = join(await realpath(dirname(reportOutput)), basename(reportOutput));
+  if (canonicalCandidate === canonicalReport) throw new Error('PDF とレポートには別の出力先を指定してください');
+  const pdfHandle = await open(candidate, 'wx', 0o600).catch(() => {
+    throw new Error('候補 PDF の出力先を新規作成できません。既存ファイルは上書きしません');
+  });
+  let reportHandle: Awaited<ReturnType<typeof open>> | undefined;
+  let completed = false;
+  try {
+    reportHandle = await open(reportOutput, 'wx', 0o600);
+    await pdfHandle.writeFile(bytes);
+    await reportHandle.writeFile(`${JSON.stringify(report, null, 2)}\n`, 'utf8');
+    completed = true;
+  } catch {
+    throw new Error('候補とレポートを保存できませんでした。出力先は新しいファイルを指定してください');
+  } finally {
+    await pdfHandle.close();
+    await reportHandle?.close();
+    if (!completed) {
+      await unlink(candidate).catch(() => undefined);
+      if (reportHandle) await unlink(reportOutput).catch(() => undefined);
+    }
+  }
+}
+
+async function redactRegions(input: string, output: string, recipePath: string, reportPath: string, env: CliEnvironment) {
+  try {
+    const recipe = await loadRecipe(recipePath);
+    const settings = requireRegionOnlyRecipe(recipe);
+    const { createCanvas } = await import('@napi-rs/canvas');
+    const canvasFactory: RasterCanvasFactory = (width, height) => {
+      const canvas = createCanvas(width, height);
+      return {
+        canvas: canvas as unknown as HTMLCanvasElement,
+        context: canvas.getContext('2d') as unknown as CanvasRenderingContext2D,
+        encodePng: async () => new Uint8Array(await canvas.encode('png')),
+        dispose: () => { canvas.width = 1; canvas.height = 1; },
+      };
+    };
+    const source = new Uint8Array(await readFile(input));
+    const result = await rasterizeAndVerify(source, settings, {
+      canvasFactory,
+      documentOptions: {
+        standardFontDataUrl: env.standardFontDataUrl,
+        cMapUrl: env.cMapUrl,
+        cMapPacked: true,
+        wasmUrl: env.wasmUrl,
+        useSystemFonts: false,
+        useWorkerFetch: false,
+      },
+      onProgress: ({ stage, page, total }) => env.stderr(`${stage}: ${page}/${total}\n`),
+    });
+    await writeRegionCandidate(output, reportPath, result.bytes, { ...result.report, approval: 'pending-human-review' });
+    env.stdout(`Candidate created (${result.bytes.byteLength} bytes). Human review is required; this output is not approved.\n`);
+  } catch (error) {
+    // File parser errors can include filenames or source text. Keep the secure command's error neutral.
+    if (error instanceof RecipeValidationError) throw error;
+    throw new Error('領域除去を完了できませんでした。入力・用紙条件・DPI・新規出力先を確認してください');
+  }
 }
 
 function usage(message: string): never {
@@ -244,6 +329,14 @@ async function dispatch(argv: string[], env: CliEnvironment): Promise<void> {
         env.stdout(`Content rules: ${matched} element(s) matched, ${result.unmatched.length} rule(s) unmatched\n`);
         for (const rule of result.unmatched) env.stdout(`  unmatched: ${describeContentRule(rule)}\n`);
       }
+      return;
+    }
+
+    case 'redact-regions': {
+      const [input, output, recipePath] = positional;
+      if (positional.length !== 3 || !input || !output || !recipePath) usage('redact-regions には input, candidate, recipe JSON が必要です');
+      if (Object.keys(options).some((key) => key !== 'report') || options.report === true) usage('redact-regions のオプションは --report <path> のみです');
+      await redactRegions(input, output, recipePath, typeof options.report === 'string' ? options.report : `${output}.report.json`, env);
       return;
     }
 

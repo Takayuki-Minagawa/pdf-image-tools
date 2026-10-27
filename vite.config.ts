@@ -2,12 +2,14 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { pdfjsAssets } from './scripts/pdfjsAssets'
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), pdfjsAssets()],
   base: '/pdf-image-tools/',
   test: {
+    exclude: ['**/node_modules/**', '**/dist/**', '**/e2e/**'],
     environment: 'node',
     setupFiles: ['./src/test/pdfjsNodePolyfill.ts'],
     alias: [

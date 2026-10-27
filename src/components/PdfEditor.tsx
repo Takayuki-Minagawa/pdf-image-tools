@@ -646,6 +646,10 @@ export default function PdfEditor() {
   };
 
   const applyRecipe = async (recipe: PdfEditRecipe) => {
+    if (recipe.regionRedaction) {
+      setOutputError('領域除去レシピは「領域除去」画面で読み込んでください。通常編集の設定は変更していません。');
+      return;
+    }
     setOutputError(null);
     setTextBoxes(structuredClone(recipe.textBoxes));
     setHeaderFooter(structuredClone(recipe.headerFooter));

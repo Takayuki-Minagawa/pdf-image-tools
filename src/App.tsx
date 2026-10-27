@@ -1,21 +1,24 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { CircleHelp, Combine, FileStack, FileText, Github, Image, Pencil } from 'lucide-react';
+import { CircleHelp, Combine, FileStack, FileText, Github, Image, Pencil, ShieldCheck } from 'lucide-react';
 import { PurposeGuide } from './components/PurposeGuide';
 import { PwaStatus } from './components/PwaStatus';
-import { subscribePdfEditorHandoff } from './utils/workflowHandoff';
+import { consumePendingPdf, subscribePdfEditorHandoff } from './utils/workflowHandoff';
+import { setPdfDraftStorageBlocked } from './utils/draftStorage';
 
 const ImageToPdfConverter = lazy(() => import('./components/ImageToPdfConverter'));
 const PdfMerger = lazy(() => import('./components/PdfMerger'));
 const PdfEditor = lazy(() => import('./components/PdfEditor'));
 const BatchProcessor = lazy(() => import('./components/BatchProcessor'));
+const RegionPreprocessor = lazy(() => import('./components/RegionPreprocessor'));
 
-export type ToolTab = 'image-to-pdf' | 'pdf-merge' | 'pdf-edit' | 'batch';
+export type ToolTab = 'image-to-pdf' | 'pdf-merge' | 'pdf-edit' | 'batch' | 'region-redact';
 
 const ACTIVE_TAB_STORAGE_KEY = 'pdf-image-tools.active-tab';
 const GUIDE_STORAGE_KEY = 'pdf-image-tools.guide-seen';
 
 const TABS = [
   { id: 'pdf-edit', label: 'PDF編集', icon: Pencil, activeClass: 'bg-amber-50 text-amber-700 border-amber-600' },
+  { id: 'region-redact', label: '領域除去', icon: ShieldCheck, activeClass: 'bg-teal-50 text-teal-700 border-teal-600' },
   { id: 'pdf-merge', label: 'PDF結合', icon: Combine, activeClass: 'bg-purple-50 text-purple-700 border-purple-600' },
   { id: 'image-to-pdf', label: '画像 → PDF', icon: Image, activeClass: 'bg-green-50 text-green-700 border-green-600' },
   { id: 'batch', label: 'バッチ', icon: FileStack, activeClass: 'bg-cyan-50 text-cyan-700 border-cyan-600' },
@@ -65,15 +68,24 @@ function App() {
     'pdf-merge': null,
     'image-to-pdf': null,
     batch: null,
+    'region-redact': null,
   });
 
   useEffect(() => {
+    setPdfDraftStorageBlocked(activeTab === 'region-redact');
     savePreference(ACTIVE_TAB_STORAGE_KEY, activeTab);
     window.history.replaceState(null, '', `#${activeTab}`);
   }, [activeTab]);
 
   const selectTab = useCallback((tab: ToolTab, focus = false) => {
+    if (tab === 'region-redact') {
+      // Block pending autosaves before unmounting editors, then discard any queued handoff.
+      setPdfDraftStorageBlocked(true);
+      consumePendingPdf();
+    }
     setMountedTabs((current) => {
+      // Confidential sessions must never coexist with hidden editor/merge sessions.
+      if (tab === 'region-redact' || current.has('region-redact')) return new Set([tab]);
       if (current.has(tab)) return current;
       const next = new Set(current);
       next.add(tab);
@@ -183,10 +195,12 @@ function App() {
                   role="tab"
                   aria-selected={isActive}
                   aria-controls={`panel-${tab.id}`}
+                  aria-describedby={tab.id === 'region-redact' ? 'region-entry-note' : undefined}
+                  title={tab.id === 'region-redact' ? 'ほかのツールの作業セッションを終了し、編集下書きを削除して前処理を開始します' : undefined}
                   tabIndex={isActive ? 0 : -1}
                   onClick={() => selectTab(tab.id)}
                   onKeyDown={(event) => handleTabKeyDown(event, tab.id)}
-                  className={`flex min-w-0 flex-1 items-center justify-center gap-1.5 border-b-2 px-2 py-4 text-sm font-medium transition-colors focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 sm:gap-2 sm:px-4 ${
+                  className={`flex min-w-0 flex-1 flex-col items-center justify-center gap-1 border-b-2 px-1 py-3 text-xs font-medium transition-colors focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 sm:flex-row sm:gap-2 sm:px-4 sm:py-4 sm:text-sm ${
                     isActive
                       ? tab.activeClass
                       : 'border-transparent text-gray-600 hover:bg-gray-50 hover:text-gray-900'
@@ -198,6 +212,7 @@ function App() {
               );
             })}
           </div>
+          <p id="region-entry-note" className="sr-only">領域除去への移動は、ほかのツールの作業セッションを終了し、既存の編集下書きを削除します。</p>
 
           <Suspense
             fallback={
@@ -206,6 +221,11 @@ function App() {
               </div>
             }
           >
+            {mountedTabs.has('region-redact') && activeTab === 'region-redact' && (
+              <section id="panel-region-redact" role="tabpanel" aria-labelledby="tab-region-redact" className="p-4 sm:p-6">
+                <RegionPreprocessor />
+              </section>
+            )}
             {mountedTabs.has('pdf-edit') && (
               <section
                 id="panel-pdf-edit"

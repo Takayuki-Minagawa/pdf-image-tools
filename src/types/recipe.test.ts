@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_HEADER_FOOTER, DEFAULT_PAGE_NUMBERING } from './pdfEdit';
 import { DEFAULT_WATERMARK } from './pdfGraphics';
-import { RECIPE_VERSION, RecipeValidationError, isRecipe, parseContentRule, parseRecipe } from './recipe';
+import { RECIPE_VERSION, RecipeValidationError, isRecipe, parseContentRule, parseRecipe, requireRegionOnlyRecipe } from './recipe';
 
 describe('parseRecipe', () => {
   it('migrates a version 1 recipe and fills the new sections with defaults', () => {
@@ -42,12 +42,22 @@ describe('parseRecipe', () => {
 
   it('rejects values that are not recipes', () => {
     expect(() => parseRecipe(null)).toThrow(RecipeValidationError);
-    expect(() => parseRecipe({ version: 3 })).toThrow(/version/);
+    expect(() => parseRecipe({ version: 4 })).toThrow(/version/);
     expect(() => parseRecipe({ version: 2, graphics: [{ kind: 'image', pageIndex: 0 }] })).toThrow(/imageDataUrl/);
     expect(() => parseRecipe({ version: 2, graphics: [{ kind: 'triangle' }] })).toThrow(/graphics\[0\]\.kind/);
     expect(() => parseRecipe({ version: 2, textBoxes: [{ fontColor: 'red' }] })).toThrow(/fontColor/);
     expect(isRecipe({ version: 2 })).toBe(true);
     expect(isRecipe({ version: 2, contentRules: [{ kind: 'text' }] })).toBe(false);
+  });
+
+  it('retains validated secure settings only in version 3 and rejects mixed execution', () => {
+    const regionRedaction = { version: 1, dpi: 144, regions: [{ id: 'r1', pages: [1], x: 10, y: 20, width: 50, height: 30, pageWidth: 400, pageHeight: 500, fill: 'white' }] };
+    const recipe = parseRecipe({ version: 3, regionRedaction });
+    expect(requireRegionOnlyRecipe(recipe)).toEqual(regionRedaction);
+    expect(() => parseRecipe({ version: 2, regionRedaction })).toThrow(/version 3/);
+    expect(() => parseRecipe({ version: 3, regionRedaction: { ...regionRedaction, dpi: -1 } })).toThrow();
+    expect(() => requireRegionOnlyRecipe(parseRecipe({ version: 3, regionRedaction, watermark: { enabled: true } }))).toThrow(/別のレシピ/);
+    expect(() => requireRegionOnlyRecipe(parseRecipe({ version: 2 }))).toThrow(/regionRedaction/);
   });
 });
 

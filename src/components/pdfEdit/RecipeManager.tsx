@@ -32,6 +32,7 @@ interface RecipeManagerProps {
 
 function summarizeRecipe(recipe: PdfEditRecipe): string {
   const parts: string[] = [];
+  if (recipe.regionRedaction) parts.push('領域除去（専用画面で実行）');
   if (recipe.textBoxes.length) parts.push(`テキスト${recipe.textBoxes.length}`);
   if (recipe.headerFooter.header.enabled || recipe.headerFooter.footer.enabled) parts.push('ヘッダー/フッター');
   if (recipe.pageNumbering.enabled) parts.push('ページ番号');

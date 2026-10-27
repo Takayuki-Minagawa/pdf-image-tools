@@ -41,6 +41,9 @@ export async function applyRecipeToPdf(
   recipe: PdfEditRecipe,
   options: ApplyRecipeOptions,
 ): Promise<ApplyRecipeResult> {
+  if (recipe.regionRedaction) {
+    throw new Error('領域除去レシピは「領域除去」画面または CLI の redact-regions で実行し、出力を目視確認してください');
+  }
   const graphics = await materializeGraphics(recipe.graphics, options.resolveImage);
 
   let contentEdits: ResolvedContentRules = { edits: [], matchCounts: [], unmatched: [] };
